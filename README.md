@@ -1,0 +1,83 @@
+# PrivDNS Gateway
+
+**Android / iOS 私密 DNS 单入口多出口分流网关** — 口语版「私密 DNS 版 Surge 网关」。
+
+手机端只设置系统级**私密 DNS / 加密 DNS**，不装任何 VPN / Clash / sing-box 客户端。
+服务端 JP 作为唯一入口与分流中心：DNS 把需要代理的域名统一指向 JP 内网 IP，
+JP 上的 sing-box 透明入口 sniff 出域名后，再分流到 HK / TW 现有 SS2022 出口或 JP 本地。
+
+```
+Android / iOS
+  │  私密 DNS / DoH / DoT
+  ▼
+JP dnsdist ──► 命中代理域名: 返回 JP 唯一内网 IP
+  │           DIRECT 域名: 返回真实 IP   BLOCK: NXDOMAIN
+  ▼
+JP sing-box (透明 tproxy 入口, sniff SNI/Host)
+  ├── AI / Binance        → TW SS2022
+  ├── YouTube/Netflix/X/IG → HK SS2022
+  └── 默认                  → JP 直出
+```
+
+核心约束：**DNS 与 sing-box 必须由同一份 `rules.conf` 生成**，否则会出现
+「DNS 认为某域名要代理、sing-box 却没有对应分流」的不一致。`pdg compile` 保证两者同源。
+
+## 仓库结构
+
+```
+config/            配置样例 (装到 /etc/pdg)
+  rules.conf         上层规则 (Surge 风格, 唯一规则源)
+  policies.conf      策略 → 出口映射
+  pdg.conf           主配置 (入口 IP / 端口 / SS2022 出口)
+src/pdg/           Python 控制面 (零三方依赖, 仅标准库)
+  rules/             解析 / 远程 RULE-SET 缓存 / 编译器
+  generators/        dnsdist / sing-box / nftables 生成器
+  cli.py             pdg 命令行
+deploy/            install.sh / systemd / dnsdist 主配置 / iOS mobileconfig
+docs/              架构 / 部署 / 客户端设置
+```
+
+## 快速开始 (开发机)
+
+无需 root，仓库内直接跑（产物写到 `./var/out`）：
+
+```bash
+export PYTHONPATH=src
+python3 -m pdg.cli compile --no-download   # 生成三件套到 var/out/
+python3 -m pdg.cli test chatgpt.com        # 查某域名分流
+python3 -m pdg.cli status                  # 查看配置与产物
+```
+
+## 部署 (JP, Debian 12)
+
+```bash
+sudo deploy/install.sh        # 装 pdg + 目录骨架 + systemd 单元
+sudoedit /etc/pdg/pdg.conf    # 填 jp_internal_ip 与 HK/TW SS2022 凭据
+# 放置 /etc/pdg/tls/{fullchain,privkey}.pem, 安装 dnsdist 与 sing-box
+sudo pdg compile && sudo pdg reload
+sudo systemctl enable --now dnsdist sing-box pdg-tproxy
+sudo pdg doctor
+```
+
+详见 [docs/deployment.md](docs/deployment.md) 与 [docs/client-setup.md](docs/client-setup.md)。
+
+## 命令速查
+
+| 命令 | 作用 |
+|---|---|
+| `pdg compile [--no-download]` | 编译生成 dnsdist/sing-box/nftables 配置 (不 reload) |
+| `pdg reload` | 编译 + 校验 + reload 服务 (校验失败自动回滚) |
+| `pdg update-rules [--force]` | 刷新远程 RULE-SET 后 reload |
+| `pdg rollback` | 回滚到上一次产物 |
+| `pdg test <domain>` | 查域名命中的规则 / 策略 / 出口 / DNS 行为 |
+| `pdg status` / `pdg doctor` | 查看配置 / 体检 |
+| `pdg ruleset list \| refresh <name>` | 远程 RULE-SET 管理 |
+| `pdg rule add\|del\|move ...` | 编辑 rules.conf |
+
+## 现状
+
+- ✅ **V2 规则编译器内核**: 单一规则源 → dnsdist + sing-box + nftables，含远程 RULE-SET 缓存/回退、校验、rollback、`test`/`doctor`/`status`。
+- ⬜ V0/V1 链路在 JP 机上的实跑验证（透明入口 sniff、SS2022 出口连通）。
+- ⬜ V3 iOS mobileconfig 自动生成 / V4 TG Bot / V5 UDP·QUIC。
+
+见 [ROADMAP.md](ROADMAP.md)。
