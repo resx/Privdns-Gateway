@@ -495,7 +495,7 @@ def handle_text(chat, text):
 
 def main():
     post("deleteWebhook", {"drop_pending_updates": False})
-    post("setMyCommands", {"commands": [
+    cmds = [
         {"command": "start", "description": "状态与菜单"},
         {"command": "status", "description": "查看状态"},
         {"command": "exits", "description": "出口列表"},
@@ -509,7 +509,10 @@ def main():
         {"command": "setfinal", "description": "设默认出口"},
         {"command": "restart", "description": "重启服务"},
         {"command": "update", "description": "更新规则库"},
-        {"command": "cancel", "description": "取消当前操作"}]})
+        {"command": "cancel", "description": "取消当前操作"}]
+    # 同时设 default 与 all_private_chats 两个 scope, 防止被其它 bot 残留的高优先级 scope 盖住
+    post("setMyCommands", {"commands": cmds})
+    post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})
     print("pdg-bot v2 started, allowed:", ALLOWED, flush=True)
     off = 0
     while True:
