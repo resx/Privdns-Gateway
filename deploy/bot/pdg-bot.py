@@ -160,7 +160,7 @@ def apply_sb(modify):
     c = load(); modify(c); _write(c)
     chk = sh(["sing-box", "check", "-c", SB])
     if chk.returncode != 0:
-        shutil.copy(SB + ".botbak", SB); sh(["systemctl", "restart", "sing-box"])
+        shutil.copy(SB + ".botbak", SB)   # 运行中的 sing-box 没动过(check 只在文件上做), 还原文件即可, 不必重启
         return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
     r = sh(["systemctl", "restart", "sing-box"])
     return r.returncode == 0, (r.stdout + r.stderr)[-300:]
@@ -529,7 +529,7 @@ def test_exits():
     c = load()
     if not clash_up():
         return _test_exits_tcp(c)
-    tags = exit_tags(c)
+    tags = concrete_tags(c)   # 只测具体出口(代理+jp直出); urltest 组的 clash 延迟接口偶尔抽风, 不测它
     if not tags:
         return "(无出口)"
     lines = []
@@ -908,7 +908,7 @@ def status_text():
             f"🌐 IP: <code>{_server_ip()}</code>\n"
             f"📤 出口({len(exits)}): {', '.join(exits)}\n"
             + (g + "\n" if g else "")
-            + f"🎯 默认出口(其余国际): <b>{c['route'].get('final')}</b>\n"
+            + f"🎯 默认出口(其余国际): <b>{final}</b>\n"
             f"📚 规则集: {len(_rs_meta())} 个\n"
             f"🌏 分流: {split}")
 
@@ -956,7 +956,7 @@ def handle_cb(chat, mid, data):
         state[chat] = "set_dot"
         edit(chat, mid, "发你的自定义 DoT 域名(先把它的 A 记录指向本机, Cloudflare 用「灰云 DNS only」)。\n"
              f"本机 IP: <code>{_server_ip()}</code>\n例: <code>dot.example.com</code>\n"
-             "我会自动签 Let's Encrypt 证书并切换(过程会短暂中断代理约 30 秒)。/cancel 取消。", BACK); return
+             "之后自动签 Let's Encrypt 证书并切换(约 30 秒内代理短暂中断)。/cancel 取消。", BACK); return
     if data.startswith("dosetdot:"):
         domain = data[9:]
         edit(chat, mid, f"正在为 <code>{domain}</code> 校验 A 记录并签证书(约 30-60 秒, 代理短暂中断)…", None)
