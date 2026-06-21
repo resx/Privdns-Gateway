@@ -227,8 +227,13 @@ def apply_sb(modify):
     if chk.returncode != 0:
         shutil.copy(SB + ".botbak", SB)   # 运行中的 sing-box 没动过(check 只在文件上做), 还原文件即可, 不必重启
         return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
+    sh(["systemctl", "reset-failed", "sing-box"])   # 清掉 start-limit 计数: 连改多条(如连删域名)快速多次重启不会触发限速锁死
     r = sh(["systemctl", "restart", "sing-box"])
-    return r.returncode == 0, (r.stdout + r.stderr)[-300:]
+    if r.returncode != 0:                            # 万一没起来, 还原文件再重启一次, 别把代理留在挂掉状态
+        shutil.copy(SB + ".botbak", SB)
+        sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
+        return False, "重启 sing-box 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
+    return True, ""
 
 PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless")
 
