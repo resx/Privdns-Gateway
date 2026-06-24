@@ -9,6 +9,7 @@
   - 🛬 落地:撤掉规则,这些域名回落各自现有出口(hk/tw)。
 - **mosdns 加常驻"解锁支"**(平时休眠):`unlock_upstream`(22.22.22.22, concurrent 1) + `geosite_unlock`(读 `unlock.txt`) + main_sequence 一条「**本机查询**命中解锁域名 → 解锁 DNS」的支(带 `jump has_resp`,否则答案会被 `remote_upstream` 覆盖——实测踩过)。只对 sing-box 直出的本机查询生效,手机劫持路径不变。
 - **开 WDA 前自检授权**:点 🔓 时先探测解锁 DNS 是否对本机返回中继(本机 IP 已在服务商后台加白),**没授权就拦下并提示去后台授权本机 IP**——避免"没授权却开 WDA → 拿不到中继、流媒体反而挂"。DNS 上游页也直接显示要授权的本机 IP。docs/INSTALL.md 加「流媒体/服务解锁(WDA)」节。
+- **修:关 WDA 现在会清空 `unlock.txt`**。原先点 🛬 只撤 sing-box 规则、没清 mosdns 的 `unlock.txt`,导致"落地模式下本机解析这些域名仍走解锁 DNS"的残留(与配置注释"落地时 unlock.txt 留空"不符)。现 `set_wda_mode(False)` 撤规则后清空 `unlock.txt` 并重启 mosdns(解锁支彻底休眠);`_write_unlock_file([])` 可写空。dns-policy-test 加「空 unlock.txt → 解锁域名回落普通上游」回归。
 - **旧装自动迁移** `migrate_mosdns_unlock`(随管理类 pdg 命令幂等补该支);install 建空 `unlock.txt`(空=休眠,不改现有行为)。
 - **测试**:dns-policy-test 加「解锁域名经本机 → 解锁 DNS(非普通上游)」断言,正好回归 `jump has_resp`。
 - 说明:解锁地区取决于厂商面板选的平台(VPS 在日本→JP 平台→日本区);解锁的价值在于**中继是干净 IP**,避开 Netflix 对机房 IP 的代理封锁。

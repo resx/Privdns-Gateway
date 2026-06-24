@@ -122,6 +122,9 @@ expect_eq      "外部来源: 代理域名 A 不劫持, 走上游"  "$(q example
 # WDA 解锁支: 本机(sing-box 直出源)查解锁域名 → 走解锁 DNS(非普通上游)。
 # 若 main_sequence 漏了 `jump has_resp`, 解锁答案会被 remote_upstream 覆盖成 $UPSTREAM_IP → 此断言即失败。
 expect_eq      "WDA解锁支: 解锁域名 → 解锁DNS(非普通上游)" "$(q unlktest.example A)" "$UNLOCK_IP"
+# 落地模式回归: 清空 unlock.txt → 解锁支休眠, 解锁域名回落普通上游(关 WDA 必须清空 unlock.txt 才彻底)
+note "清空 unlock.txt(= 落地模式)…"; : > "$WORK/rules/unlock.txt"; start_mosdns
+expect_eq      "落地(空 unlock.txt): 解锁域名 → 普通上游" "$(q unlktest.example A)" "$UPSTREAM_IP"
 
 # ── 4c. 上游故障转移(concurrent=2): local = [好 mock, 死端口], 连查多个不同国内子域都应成功 ──
 # (用不同子域绕开缓存; 若 concurrent 退回默认 1=随机选 1 个不转移, 约半数会命中死端口而失败)

@@ -454,21 +454,23 @@ def _wda_authorized():
     out = sh(["dig", "+short", "+time=3", "+tries=2", "@" + UNLOCK_DNS, "nflxso.net", "A"]).stdout
     return any(ln.strip().startswith(net24) for ln in out.splitlines())
 
-def _sync_unlock_domains():
-    """把 WDA_DOMAINS 写进 mosdns unlock.txt(domain: 前缀); 内容变了才重启 mosdns(失败回滚)。"""
-    try:
-        if "unlock_upstream" not in open(MOSDNS_CONF).read():
-            return False, "mosdns 还没有解锁支(unlock_upstream)。请先在服务器跑  sudo pdg update  补上再切。"
-    except OSError as e:
-        return False, f"读 mosdns 配置失败: {e}"
+def _write_unlock_file(domains):
+    """把 domains(可空)写进 mosdns unlock.txt(domain: 前缀); 变了才重启 mosdns(失败回滚)。
+    空列表 = 落地模式: 清空文件 → mosdns 解锁支不命中任何域名 = 休眠(本机查询这些域名回落普通上游)。"""
     path = os.path.join(MOSDNS_RULES, "unlock.txt")
-    want = "".join("domain:%s\n" % d for d in WDA_DOMAINS)
+    want = "".join("domain:%s\n" % d for d in domains)
     try:
         cur = open(path).read()
     except OSError:
         cur = None
-    if cur == want:
-        return True, ""
+    if cur == want or (want == "" and not cur):
+        return True, ""                       # 已是目标(含: 要清空且本来就空/无文件)
+    if domains:                               # 只有"写域名"才要求 mosdns 已有解锁支
+        try:
+            if "unlock_upstream" not in open(MOSDNS_CONF).read():
+                return False, "mosdns 还没有解锁支(unlock_upstream)。请先在服务器跑  sudo pdg update  补上再切。"
+        except OSError as e:
+            return False, f"读 mosdns 配置失败: {e}"
     os.makedirs(MOSDNS_RULES, exist_ok=True)
     if cur is not None:
         shutil.copy(path, path + ".bak")
@@ -489,7 +491,7 @@ def set_wda_mode(on):
                            "常见原因: 没订阅解锁服务 / 没在服务商<b>后台把本机公网 IP <code>%s</code> 加白授权</b> / DNS 不通。\n"
                            "→ 去服务商后台授权本机 IP <code>%s</code>, 再点 🔓。(未改动, 仍走落地出口)"
                            % (UNLOCK_DNS, ip, ip))
-        ok, err = _sync_unlock_domains()
+        ok, err = _write_unlock_file(WDA_DOMAINS)   # mosdns 侧: 写满解锁清单
         if not ok:
             return False, err
         os.makedirs(RS_DIR, exist_ok=True)
@@ -510,7 +512,12 @@ def set_wda_mode(on):
     if on:
         return True, ("✅ 已切到【🔓 WDA 解锁】: %d 个域名走 WDA(jp 直出 + 22.22.22.22 中继)。\n"
                       "其余流量照常分流。哪个服务在 WDA 下不灵, 切回【落地出口】即可。") % len(WDA_DOMAINS)
-    return True, "✅ 已切到【🛬 落地出口】: 解锁域名回落到各自出口(hk/tw 等), 不走 WDA。"
+    # 关闭: sing-box 规则已撤; 再清空 mosdns unlock.txt, 让解锁支彻底休眠(否则本机解析这些域名仍走解锁 DNS)
+    okc, errc = _write_unlock_file([])
+    if okc:
+        return True, "✅ 已切到【🛬 落地出口】: 解锁域名回落各自出口(hk/tw), mosdns 解锁清单已清空。"
+    return True, ("✅ 已切到【🛬 落地出口】(sing-box 规则已撤)。\n"
+                  "⚠️ 但清空 mosdns unlock.txt 失败(" + errc + "): 本机解析这些域名可能仍走解锁 DNS, 可再点一次 🛬 或手动清空。")
 
 # ── TCP Fast Open ──
 def _tfo_on(c):
