@@ -60,8 +60,9 @@ cd privdns-gateway && sudo ./install.sh
 
 1. 手机【私密 DNS / DoT】填你的域名(如 `dot.example.com`)。
 2. Telegram 给 bot 发 `/start`:
-   - **📤 出口管理 → 添加**:粘贴 `ss:// / vmess:// / trojan:// / vless://` 链接(也认 Surge 的 `名字 = ss, …` 行)。
-     > 这几种是 **bot 能直接粘** 的;sing-box 本身还支持 **hysteria / hysteria2 / tuic / vless-reality / shadowtls / anytls / ssh / socks / http / wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json` 即可用,或开 issue 让 bot 加解析。
+   - **📤 出口管理 → 添加**:直接粘贴节点链接。
+     > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
+     > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
 3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。

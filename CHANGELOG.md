@@ -2,6 +2,12 @@
 
 本项目无正式版本号,按日期记录主要变化;完整提交见 git 历史。
 
+## 2026-06-24 — 出口支持更多协议链接(hysteria2/tuic/vless-reality/anytls/socks5/http)
+
+- **bot「📤 出口管理 → 添加」新增解析**:`hysteria2://`(含 sni/insecure/obfs)、`tuic://`(uuid:pass、alpn/congestion_control)、`anytls://`、`socks5://`、`http(s)://`,并**扩展 `vless://` 认 Reality**(`pbk`→`reality.public_key`、`sid`→`short_id`、`fp`→`utls.fingerprint`、`flow`)。`PROXY_TYPES` 同步扩容,新协议出口可正常选默认/进故障组/测出口/删除。
+- **验证**:`tests/test-parse-links.py`(进 CI)对各协议断言字段映射;另在真机用 **`sing-box check`(1.12.25)逐一校验**生成的出站合法(rc=0)。⚠️ 连通性需各自拿真实节点测(解析+配置合法已保证)。
+- 仍走手写 config 的:`shadowtls`(无标准链接)、`ssh`(无链接)、`wireguard`(1.12 是 `endpoints`)。
+
 ## 2026-06-24 — 出口支持粘贴 Surge 的 ss 行
 
 - **「📤 出口管理 → 添加」除 `ss:// / vmess:// / trojan:// / vless://` 链接外,也认 Surge 代理行**:`名字 = ss, 服务器, 端口, encrypt-method=…, password="…", tfo=true, udp-relay=true`(`encrypt-method`→method、`tfo=true`→`tcp_fast_open`;SS2022 如 `2022-blake3-aes-128-gcm` OK;udp-relay 是 sing-box ss 出站默认行为)。其它类型仍用对应 URI。

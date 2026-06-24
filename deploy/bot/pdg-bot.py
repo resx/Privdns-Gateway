@@ -210,7 +210,9 @@ def apply_sb(modify):
         return False, "重启 sing-box 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
     return True, ""
 
-PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless")
+# 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。sing-box 支持的都列上。
+PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
+               "tuic", "anytls", "shadowtls", "socks", "http")
 
 def proxy_outbounds(c):
     return [o for o in c["outbounds"] if o.get("type") in PROXY_TYPES]
@@ -240,11 +242,21 @@ def parse_link(link):
     if link.startswith("trojan://"):
         return _parse_trojan(link)
     if link.startswith("vless://"):
-        return _parse_vless(link)
+        return _parse_vless(link)                     # 含 reality/flow
+    if link.startswith(("hysteria2://", "hy2://")):
+        return _parse_hysteria2(link)
+    if link.startswith("tuic://"):
+        return _parse_tuic(link)
+    if link.startswith("anytls://"):
+        return _parse_anytls(link)
+    if link.startswith(("socks://", "socks5://")):
+        return _parse_socks(link)
+    if link.startswith(("http://", "https://")):
+        return _parse_http(link)
     if re.search(r"=\s*ss\s*,", link, re.I):          # Surge 代理行: 名字 = ss, 服务器, 端口, encrypt-method=…, password=…
         return _parse_surge(link)
-    raise ValueError("只支持 ss:// / vmess:// / trojan:// / vless:// 链接, 或 Surge 的 ss 行"
-                     "(名字 = ss, 服务器, 端口, encrypt-method=…, password=…)")
+    raise ValueError("支持: ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / "
+                     "anytls:// / socks5:// / http:// 链接, 或 Surge 的 ss 行(名字 = ss, …)")
 
 def _b64(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode("utf-8", "ignore")
@@ -338,11 +350,86 @@ def _parse_vless(link):
           "server": u.hostname, "server_port": u.port or 443, "uuid": u.username, "flow": q.get("flow", "")}
     if not ob["flow"]:
         ob.pop("flow")
-    if q.get("security") in ("tls", "reality", "xtls"):
+    sec = q.get("security")
+    if sec in ("tls", "reality", "xtls"):
         ob["tls"] = _tls_block(q.get("sni") or u.hostname, q.get("allowInsecure") in ("1", "true"))
+        if sec == "reality":                          # Reality: 公钥 pbk + short_id sid(+ 指纹 fp)
+            ob["tls"]["reality"] = {"enabled": True, "public_key": q.get("pbk", ""), "short_id": q.get("sid", "")}
+        if q.get("fp"):
+            ob["tls"]["utls"] = {"enabled": True, "fingerprint": q["fp"]}
     tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"))
     if tr:
         ob["transport"] = tr
+    return ob
+
+def _userinfo(u):
+    """URI 用户信息整体取出(hysteria2/anytls 的 password 是单串, 但容错 user:pass 形式)。"""
+    s = u.username or ""
+    if u.password is not None:
+        s += ":" + u.password
+    return urllib.parse.unquote(s)
+
+def _insec(q):
+    return any(q.get(k) in ("1", "true") for k in ("insecure", "allowInsecure", "allow_insecure"))
+
+def _parse_hysteria2(link):
+    u = urllib.parse.urlparse(link); q = _qs(u)
+    ob = {"type": "hysteria2", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
+          "server": u.hostname, "server_port": u.port or 443, "password": _userinfo(u),
+          "tls": _tls_block(q.get("sni") or q.get("peer") or u.hostname, _insec(q))}
+    if q.get("obfs"):                                 # 通常是 salamander
+        ob["obfs"] = {"type": q["obfs"], "password": q.get("obfs-password", "")}
+    return ob
+
+def _parse_tuic(link):
+    u = urllib.parse.urlparse(link); q = _qs(u)
+    ob = {"type": "tuic", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
+          "server": u.hostname, "server_port": u.port or 443,
+          "uuid": urllib.parse.unquote(u.username or ""), "password": urllib.parse.unquote(u.password or ""),
+          "tls": _tls_block(q.get("sni") or u.hostname, _insec(q))}
+    if q.get("alpn"):
+        ob["tls"]["alpn"] = q["alpn"].split(",")
+    if q.get("congestion_control"):
+        ob["congestion_control"] = q["congestion_control"]
+    if q.get("udp_relay_mode"):
+        ob["udp_relay_mode"] = q["udp_relay_mode"]
+    return ob
+
+def _parse_anytls(link):
+    u = urllib.parse.urlparse(link); q = _qs(u)
+    return {"type": "anytls", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
+            "server": u.hostname, "server_port": u.port or 443, "password": _userinfo(u),
+            "tls": _tls_block(q.get("sni") or u.hostname, _insec(q))}
+
+def _parse_socks(link):
+    u = urllib.parse.urlparse(link)
+    ob = {"type": "socks", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
+          "server": u.hostname, "server_port": u.port or 1080, "version": "5"}
+    user = urllib.parse.unquote(u.username) if u.username else None
+    pw = urllib.parse.unquote(u.password) if u.password else None
+    if user and pw is None and ":" not in user:       # socks5://base64(user:pass)@host:port 也常见
+        try:
+            d = _b64(user)
+            if ":" in d:
+                user, pw = d.split(":", 1)
+        except Exception:  # noqa: BLE001
+            pass
+    if user:
+        ob["username"] = user
+    if pw:
+        ob["password"] = pw
+    return ob
+
+def _parse_http(link):
+    u = urllib.parse.urlparse(link)
+    ob = {"type": "http", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
+          "server": u.hostname, "server_port": u.port or (443 if u.scheme == "https" else 80)}
+    if u.username:
+        ob["username"] = urllib.parse.unquote(u.username)
+    if u.password:
+        ob["password"] = urllib.parse.unquote(u.password)
+    if u.scheme == "https":
+        ob["tls"] = _tls_block(u.hostname)
     return ob
 
 # ── 故障切换组 (urltest) ──
@@ -1431,7 +1518,7 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, rules_text(), BACK); return
     if data == "add_exit":
         state[chat] = "add_exit"
-        edit(chat, mid, "发一条节点链接：<code>ss:// / vmess:// / trojan:// / vless://</code>(也认 Surge 的 <code>名字 = ss, …</code> 行)\n/cancel 取消。", BACK); return
+        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n/cancel 取消。", BACK); return
     if data == "add_grp":
         state[chat] = "add_group"
         edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(自动选最快/坏了自动切)。\n"
@@ -1637,7 +1724,7 @@ def handle_text(chat, text):
         if cmd == "/rules":
             send(chat, rules_text(), BACK); return
         if cmd == "/addexit":
-            state[chat] = "add_exit"; send(chat, "发节点链接：<code>ss:// / vmess:// / trojan:// / vless://</code>(也认 Surge 的 <code>名字 = ss, …</code> 行)。/cancel 取消。", BACK); return
+            state[chat] = "add_exit"; send(chat, "发节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行。/cancel 取消。", BACK); return
         if cmd == "/group":
             state[chat] = "add_group"; send(chat, "发「<b>组名 出口1 出口2 …</b>」建故障切换组。/cancel 取消。", BACK); return
         if cmd == "/addrule":
