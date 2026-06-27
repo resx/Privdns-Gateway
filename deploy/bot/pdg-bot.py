@@ -1713,7 +1713,8 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, f"🚀 <b>TCP Fast Open</b>\n当前: <b>{'开启' if on else '关闭'}</b>\n"
              "降低到落地的握手延迟; 需落地端也支持, 否则自动回落普通握手。",
              {"inline_keyboard": [[{"text": "开启", "callback_data": "tfo:on"}, {"text": "关闭", "callback_data": "tfo:off"}],
-                                  [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}]]}); return
+                                  [{"text": "⬅️ 返回运维", "callback_data": "nav:ops"}],
+                                  [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data in ("tfo:on", "tfo:off"):
         ok, msg = set_tfo(data == "tfo:on"); edit(chat, mid, msg if ok else ("❌ " + msg), OPS_BACK); return
     if data == "restart":

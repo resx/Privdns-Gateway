@@ -62,6 +62,9 @@ assert 'edit(chat, mid, "🔄 检查更新中…", None)' not in bot, (
 assert_near('if data == "dnsup":', '"callback_data": "menu"', (
     "DNS upstream page should include a main-menu button"
 ), window=1600)
+assert_near('if data == "tfo":', '"callback_data": "menu"', (
+    "TFO page should include a main-menu button"
+), window=900)
 
 callback_block = bot[bot.find('elif "callback_query" in u:'):]
 answer_pos = callback_block.find('answer_cb_async(q["id"])')
