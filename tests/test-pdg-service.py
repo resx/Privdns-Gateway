@@ -106,7 +106,9 @@ with tempfile.TemporaryDirectory() as directory:
         "unsupported://ignored",
     ])
     subscription_data = base64.urlsafe_b64encode(subscription_text.encode()).rstrip(b"=")
-    service._fetch_subscription = lambda url: subscription_data
+    encoded_title = base64.urlsafe_b64encode("🇭🇰 港台专线".encode()).decode().rstrip("=")
+    assert service._subscription_title({"profile-title": f"base64:{encoded_title}"}) == "🇭🇰 港台专线"
+    service._fetch_subscription = lambda url: (subscription_data, "🇭🇰 港台专线")
     try:
         service.preview_subscription("http://127.0.0.1/nodes")
         raise AssertionError("private subscription URL should fail")
@@ -121,6 +123,9 @@ with tempfile.TemporaryDirectory() as directory:
     assert config_path.read_bytes() == unchanged
     subscription_url = "https://subscribe.example/nodes?token=top-secret&client=sing-box&udp=1"
     categories = [{"name": "香港", "pattern": "HK|香港"}, {"name": "台湾", "pattern": "TW|台湾"}]
+    auto_named = service.preview_subscription(subscription_url)
+    assert auto_named["label"] == "🇭🇰 港台专线" and not auto_named["custom_label"]
+    assert auto_named["group"] == "🇭🇰-港台专线" and not auto_named["custom_group"]
     overrides = {
         "types": ["socks"], "rename": [{"pattern": "^(HK|TW)-", "replacement": "Region-$1-"}],
         "sort": "name", "properties": {"tcp_fast_open": True, "udp_fragment": True},
@@ -129,6 +134,8 @@ with tempfile.TemporaryDirectory() as directory:
         subscription_url, "机场 A", categories=categories, overrides=overrides,
     )
     assert sub_preview["count"] == 2 and sub_preview["skipped"] == 1
+    assert sub_preview["custom_label"]
+    assert sub_preview["group"] == "机场-A" and not sub_preview["custom_group"]
     assert [group["count"] for group in sub_preview["groups"]] == [2, 1, 1]
     assert any("🇭🇰" in node["tag"] for node in sub_preview["nodes"])
     assert any("🇹🇼" in node["tag"] for node in sub_preview["nodes"])
@@ -141,6 +148,8 @@ with tempfile.TemporaryDirectory() as directory:
     assert "top-secret" not in json.dumps(service.list_subscriptions(), ensure_ascii=False)
     sub_meta = json.loads(subscription_path.read_text(encoding="utf-8"))[saved_sub["id"]]
     assert sub_meta["url"] == subscription_url
+    assert sub_meta["label_input"] == "机场 A"
+    assert sub_meta["group"] == "机场-A" and sub_meta["group_input"] == ""
     assert sub_meta["overrides"] == overrides
     old_nodes = sub_meta["nodes"]
     current = json.loads(config_path.read_text(encoding="utf-8"))
@@ -149,9 +158,9 @@ with tempfile.TemporaryDirectory() as directory:
     owned_nodes = [item for item in current["outbounds"] if item.get("tag") in old_nodes]
     assert all(item.get("tcp_fast_open") is True and item.get("udp_fragment") is True for item in owned_nodes)
     anytls = {"type": "anytls", "tag": "AnyTLS", "server": "node.example", "server_port": 443}
-    service._fetch_subscription = lambda url: base64.urlsafe_b64encode(
+    service._fetch_subscription = lambda url: (base64.urlsafe_b64encode(
         b"anytls://password@node.example:443#AnyTLS"
-    ).rstrip(b"=")
+    ).rstrip(b"="), "")
     anytls_preview = service.preview_subscription(
         "https://subscribe.example/anytls", overrides={"properties": {"tcp_fast_open": True}},
     )
@@ -163,15 +172,28 @@ with tempfile.TemporaryDirectory() as directory:
     current["route"]["rules"].append({"domain_suffix": ["owned.example"], "outbound": old_nodes[-1]})
     config_path.write_text(json.dumps(current), encoding="utf-8")
     service.set_group_selection(sub_meta["group"], old_nodes[0])
+    meta_before_migration = json.loads(subscription_path.read_text(encoding="utf-8"))
+    meta_before_migration[saved_sub["id"]].pop("group_input", None)
+    meta_before_migration[saved_sub["id"]]["group"] = saved_sub["id"] + "-auto"
+    for group_info in meta_before_migration[saved_sub["id"]]["groups"]:
+        if group_info["label"] == "全部节点":
+            group_info["tag"] = saved_sub["id"] + "-auto"
+    subscription_path.write_text(json.dumps(meta_before_migration), encoding="utf-8")
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    for outbound in current["outbounds"]:
+        if outbound.get("tag") == sub_meta["group"]:
+            outbound["tag"] = saved_sub["id"] + "-auto"
+    config_path.write_text(json.dumps(current), encoding="utf-8")
 
-    service._fetch_subscription = lambda url: base64.urlsafe_b64encode(
+    service._fetch_subscription = lambda url: (base64.urlsafe_b64encode(
         "socks5://user:newpass@sub-hk.example.com:1080#🇭🇰 HK-01".encode()
-    ).rstrip(b"=")
+    ).rstrip(b"="), "🇭🇰 港台专线")
     refreshed_sub = service.refresh_subscription(saved_sub["id"])
     assert refreshed_sub["count"] == 1
     current = json.loads(config_path.read_text(encoding="utf-8"))
-    selected_group = next(item for item in current["outbounds"] if item.get("tag") == sub_meta["group"])
+    selected_group = next(item for item in current["outbounds"] if item.get("tag") == "机场-A")
     assert selected_group["type"] == "selector" and selected_group["default"] == old_nodes[0]
+    assert all(item.get("tag") != saved_sub["id"] + "-auto" for item in current["outbounds"])
     assert all(rule.get("outbound") != old_nodes[-1] for rule in current["route"]["rules"])
     assert any(rule.get("outbound") == sub_meta["group"] for rule in current["route"]["rules"])
     service.set_final(sub_meta["group"])

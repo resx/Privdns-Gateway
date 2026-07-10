@@ -2,6 +2,8 @@
 """PrivDNS Gateway 管理业务服务，供 Bot 与 Web API 复用。"""
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import ipaddress
 import json
@@ -288,13 +290,29 @@ class GatewayService:
             properties[name] = value
         return {"types": types, "rename": rename, "sort": sort, "properties": properties}
 
-    def _fetch_subscription(self, url: str) -> bytes:
+    @staticmethod
+    def _subscription_title(headers) -> str:
+        raw = str(headers.get("profile-title", "")).strip()
+        if not raw:
+            return ""
+        if raw.lower().startswith("base64:"):
+            encoded = raw[7:].strip()
+            try:
+                raw = base64.b64decode(
+                    encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True,
+                ).decode("utf-8")
+            except (binascii.Error, UnicodeDecodeError, ValueError):
+                return ""
+        return urllib.parse.unquote(raw).strip()[:40]
+
+    def _fetch_subscription(self, url: str) -> tuple[bytes, str]:
         self._require_public_subscription_host(url)
         request = urllib.request.Request(url, headers={"User-Agent": "privdns-gateway-subscription"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 final_url = self._subscription_url(response.geturl())
                 self._require_public_subscription_host(final_url)
+                title = self._subscription_title(response.headers)
                 data = response.read(8 * 1024 * 1024 + 1)
         except ServiceError:
             raise
@@ -304,7 +322,7 @@ class GatewayService:
             raise ServiceError("节点订阅响应为空")
         if len(data) > 8 * 1024 * 1024:
             raise ServiceError("节点订阅超过 8MB 限制")
-        return data
+        return data, title
 
     @staticmethod
     def _subscription_tag(identifier: str, outbound: dict, used: dict[str, str]) -> str:
@@ -413,6 +431,7 @@ class GatewayService:
         identifier: str | None = None,
         categories: list[dict] | None = None,
         overrides: dict | None = None,
+        fallback_label: str = "",
     ) -> dict:
         url = self._subscription_url(url)
         identifier = identifier or self._subscription_id(url)
@@ -420,7 +439,8 @@ class GatewayService:
         exclude_re = self._subscription_regex(exclude, "排除")
         normalized_overrides = self._normalize_subscription_overrides(overrides)
         try:
-            parsed, errors = parse_subscription(self._fetch_subscription(url))
+            subscription_data, remote_label = self._fetch_subscription(url)
+            parsed, errors = parse_subscription(subscription_data)
         except ValueError as error:
             raise ServiceError(str(error)) from error
         if len(parsed) > 500:
@@ -463,8 +483,13 @@ class GatewayService:
         if not outbounds:
             raise ServiceError("订阅没有可应用的唯一节点")
 
-        clean_label = label.strip()[:40] or urllib.parse.urlparse(url).hostname or identifier
-        group_tag = self._group_tag(group, identifier + "-auto")
+        label_input = label.strip()[:40]
+        clean_label = (
+            label_input or remote_label or fallback_label.strip()[:40]
+            or urllib.parse.urlparse(url).hostname or identifier
+        )
+        group_input = group.strip()
+        group_tag = self._group_tag(group_input, clean_label)
         if group_tag in {item["tag"] for item in outbounds}:
             raise ServiceError("订阅分类组名称与节点冲突")
 
@@ -482,8 +507,9 @@ class GatewayService:
         } for item in outbounds[:30]]
         return {
             "id": identifier, "url": url, "url_display": self._masked_subscription_url(url),
-            "label": clean_label, "include": include.strip(), "exclude": exclude.strip(),
-            "group": group_tag, "outbounds": outbounds, "nodes": previews,
+            "label": clean_label, "label_input": label_input,
+            "include": include.strip(), "exclude": exclude.strip(),
+            "group": group_tag, "group_input": group_input, "outbounds": outbounds, "nodes": previews,
             "count": len(outbounds), "skipped": len(errors) + len(parsed) - len(selected),
             "added": added, "updated": updated, "removed": removed,
             "groups": self._subscription_groups(identifier, group_tag, outbounds, named_tags, categories),
@@ -492,15 +518,37 @@ class GatewayService:
         }
 
     @staticmethod
+    def _stored_label_input(info: dict) -> str:
+        if "label_input" in info:
+            return str(info.get("label_input", ""))
+        label = str(info.get("label", ""))
+        host = urllib.parse.urlparse(str(info.get("url", ""))).hostname or ""
+        return "" if label == host else label
+
+    @classmethod
+    def _stored_group_input(cls, identifier: str, info: dict) -> str:
+        if "group_input" in info:
+            return str(info.get("group_input", ""))
+        group = str(info.get("group", ""))
+        automatic = {identifier + "-auto"}
+        label = str(info.get("label", ""))
+        if label:
+            automatic.add(cls._group_tag(label))
+        return "" if group in automatic else group
+
+    @staticmethod
     def _public_subscription(identifier: str, info: dict) -> dict:
         url = str(info.get("url", ""))
         parsed = urllib.parse.urlparse(url)
         masked = GatewayService._masked_subscription_url(url) if parsed.scheme else ""
         return {
             "id": identifier, "label": info.get("label") or identifier,
+            "custom_label": bool(GatewayService._stored_label_input(info)),
             "url": masked, "has_secret": bool(parsed.query or parsed.username or parsed.password or parsed.fragment),
             "include": info.get("include", ""), "exclude": info.get("exclude", ""),
-            "group": info.get("group"), "groups": info.get("groups", []),
+            "group": info.get("group"),
+            "custom_group": bool(GatewayService._stored_group_input(identifier, info)),
+            "groups": info.get("groups", []),
             "categories": info.get("categories", []), "overrides": info.get("overrides", {}),
             "count": int(info.get("count", 0)), "skipped": int(info.get("skipped", 0)),
             "updated_at": info.get("updated_at"), "last_error": info.get("last_error"),
@@ -522,8 +570,10 @@ class GatewayService:
         )
         result = {
             key: value for key, value in prepared.items()
-            if key not in {"url", "outbounds", "category_input", "override_input"}
+            if key not in {"url", "outbounds", "label_input", "group_input", "category_input", "override_input"}
         }
+        result["custom_label"] = bool(prepared["label_input"])
+        result["custom_group"] = bool(prepared["group_input"])
         result["categories"] = prepared["category_input"]
         result["overrides"] = prepared["override_input"]
         return result
@@ -531,7 +581,7 @@ class GatewayService:
     def save_subscription(
         self, url: str, label: str = "", include: str = "", exclude: str = "",
         group: str = "", identifier: str | None = None, categories: list[dict] | None = None,
-        overrides: dict | None = None,
+        overrides: dict | None = None, fallback_label: str = "",
     ) -> dict:
         with self._metadata_lock:
             meta = self._subscription_meta()
@@ -539,7 +589,7 @@ class GatewayService:
                 raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
             previous = meta.get(identifier or self._subscription_id(url), {})
             prepared = self._prepare_subscription(
-                url, label, include, exclude, group, identifier, categories, overrides,
+                url, label, include, exclude, group, identifier, categories, overrides, fallback_label,
             )
             identifier = prepared["id"]
             old_nodes = set(previous.get("nodes", []))
@@ -556,6 +606,9 @@ class GatewayService:
                 item.get("tag"): item for item in self.control.load().get("outbounds", [])
                 if item.get("tag") in old_groups and item.get("type") in GROUP_TYPES
             }
+            old_master = existing_groups.get(previous.get("group"))
+            if new_group not in existing_groups and old_master:
+                existing_groups[new_group] = old_master
 
             def modify(config):
                 occupied = {
@@ -617,8 +670,9 @@ class GatewayService:
             meta = self._subscription_meta()
             meta[identifier] = {
                 "url": prepared["url"], "label": prepared["label"],
+                "label_input": prepared["label_input"],
                 "include": prepared["include"], "exclude": prepared["exclude"],
-                "group": new_group,
+                "group": new_group, "group_input": prepared["group_input"],
                 "groups": [{"tag": item["tag"], "label": item["label"], "count": item["count"]} for item in group_specs],
                 "categories": prepared["category_input"], "overrides": prepared["override_input"],
                 "nodes": sorted(new_nodes), "count": prepared["count"], "skipped": prepared["skipped"],
@@ -633,18 +687,21 @@ class GatewayService:
             raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
         prepared = self._prepare_subscription(
             str(changes.get("url") or info.get("url", "")),
-            str(changes["label"]) if "label" in changes else str(info.get("label", "")),
+            str(changes["label"]) if "label" in changes else self._stored_label_input(info),
             str(changes["include"]) if "include" in changes else str(info.get("include", "")),
             str(changes["exclude"]) if "exclude" in changes else str(info.get("exclude", "")),
-            str(changes["group"]) if "group" in changes else str(info.get("group", "")),
+            str(changes["group"]) if "group" in changes else self._stored_group_input(identifier, info),
             identifier,
             changes["categories"] if "categories" in changes else info.get("categories", []),
             changes["overrides"] if "overrides" in changes else info.get("overrides", {}),
+            str(info.get("label", "")),
         )
         result = {
             key: value for key, value in prepared.items()
-            if key not in {"url", "outbounds", "category_input", "override_input"}
+            if key not in {"url", "outbounds", "label_input", "group_input", "category_input", "override_input"}
         }
+        result["custom_label"] = bool(prepared["label_input"])
+        result["custom_group"] = bool(prepared["group_input"])
         result["categories"] = prepared["category_input"]
         result["overrides"] = prepared["override_input"]
         return result
@@ -655,13 +712,14 @@ class GatewayService:
             raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
         return self.save_subscription(
             str(changes.get("url") or info.get("url", "")),
-            str(changes["label"]) if "label" in changes else str(info.get("label", "")),
+            str(changes["label"]) if "label" in changes else self._stored_label_input(info),
             str(changes["include"]) if "include" in changes else str(info.get("include", "")),
             str(changes["exclude"]) if "exclude" in changes else str(info.get("exclude", "")),
-            str(changes["group"]) if "group" in changes else str(info.get("group", "")),
+            str(changes["group"]) if "group" in changes else self._stored_group_input(identifier, info),
             identifier,
             changes["categories"] if "categories" in changes else info.get("categories", []),
             changes["overrides"] if "overrides" in changes else info.get("overrides", {}),
+            str(info.get("label", "")),
         )
 
     def refresh_subscription(self, identifier: str) -> dict:

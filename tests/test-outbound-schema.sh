@@ -50,6 +50,8 @@ links = [
     "trojan://pw@t.example.com:443?sni=t.example.com#TROJAN",
     "vless://%s@r.example.com:443?security=reality&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0"
     "&sid=ab12&fp=chrome&flow=xtls-rprx-vision&sni=www.microsoft.com#REALITY" % U,
+    "vless://%s@r2.example.com:443?security=reality&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0"
+    "&sid=cd34&sni=www.microsoft.com#REALITY-NO-FP" % U,
     "vless://%s@g.example.com:443?security=tls&type=grpc&serviceName=mygrpc&sni=g.example.com#GRPC" % U,
     "hysteria2://hp@h2.example.com:8443?sni=h2.example.com&obfs=salamander&obfs-password=ob#HY2",
     "tuic://%s:tp@tuic.example.com:443?sni=tuic.example.com&congestion_control=bbr&alpn=h3#TUIC" % U,

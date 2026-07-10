@@ -251,8 +251,13 @@ def _parse_vless(link):
             outbound["tls"]["reality"] = {
                 "enabled": True, "public_key": query.get("pbk", ""), "short_id": query.get("sid", ""),
             }
-        if query.get("fp"):
-            outbound["tls"]["utls"] = {"enabled": True, "fingerprint": query["fp"]}
+            outbound["tls"]["utls"] = {
+                "enabled": True, "fingerprint": query.get("fp") or query.get("fingerprint") or "chrome",
+            }
+        elif query.get("fp") or query.get("fingerprint"):
+            outbound["tls"]["utls"] = {
+                "enabled": True, "fingerprint": query.get("fp") or query["fingerprint"],
+            }
     transport = _transport(query.get("type", "tcp"), query.get("host"), query.get("path"),
                            query.get("serviceName") or query.get("service_name"))
     if transport:

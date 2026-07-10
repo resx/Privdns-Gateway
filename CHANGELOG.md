@@ -2,6 +2,13 @@
 
 本项目按发布 tag 记录稳定版本;完整提交见 git 历史。
 
+## 2026-07-10 — v2.4.2(订阅组名与 Reality 兼容修复)
+
+- 新订阅默认使用手工订阅名称或响应头 `profile-title` 作为主分类组名称，支持 URL 编码及 `base64:` 标题；无标题时回退到订阅域名。
+- 旧版 `sub_<hash>-auto` 自动组在刷新时迁移为可读名称，同时保留 selector 固定节点、默认出口和分流引用；人工订阅名与人工组名保持不变。
+- Reality 客户端即使分享链接未携带 `fp` 也会启用 uTLS 并使用 `chrome` 指纹，修复 sing-box `initialize outbound: uTLS is required by reality client` 校验失败。
+- 增加订阅标题、自动组迁移、固定选择保留及 Reality 无指纹场景回归，并通过锁定版 sing-box 1.12.25 全协议配置检查。
+
 ## 2026-07-10 — v2.4.1(订阅名称与添加流程优化)
 
 - 节点和故障切换组名称支持国旗 emoji、中文及其他 Unicode 符号，订阅预览、配置标签和管理界面会保留原始地区标识。

@@ -74,7 +74,13 @@ check("vless:// reality",
                    "fp=chrome&flow=xtls-rprx-vision&type=tcp&sni=www.microsoft.com#REALITY"),
       type="vless", server="r.example.com", server_port=443, uuid="uuid-9", flow="xtls-rprx-vision",
       tls__server_name="www.microsoft.com", tls__reality__enabled=True, tls__reality__public_key="PUBKEY",
-      tls__reality__short_id="ab12", tls__utls__fingerprint="chrome")
+      tls__reality__short_id="ab12", tls__utls__enabled=True, tls__utls__fingerprint="chrome")
+
+check("vless:// reality 默认 uTLS",
+      m.parse_link("vless://uuid-10@r.example.com:443?security=reality&pbk=PUBKEY&sid=cd34&"
+                   "sni=www.microsoft.com#REALITY-NO-FP"),
+      type="vless", tls__reality__enabled=True, tls__utls__enabled=True,
+      tls__utls__fingerprint="chrome")
 
 # vless gRPC: serviceName= 要进 transport.service_name(不是只看 path)
 check("vless:// grpc serviceName",

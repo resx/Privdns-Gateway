@@ -65,6 +65,8 @@ interface Subscription {
   include: string
   exclude: string
   group: string
+  custom_label: boolean
+  custom_group: boolean
   groups: { tag: string; label: string; count: number }[]
   categories: { name: string; pattern: string }[]
   overrides: SubscriptionOverrides
@@ -440,10 +442,10 @@ function subscriptionInputKey() {
 function editSubscription(item?: Subscription) {
   editingSubscription.value = item || null
   subscriptionUrl.value = ''
-  subscriptionLabel.value = item?.label || ''
+  subscriptionLabel.value = item?.custom_label ? item.label : ''
   subscriptionInclude.value = item?.include || ''
   subscriptionExclude.value = item?.exclude || ''
-  subscriptionGroup.value = item?.group || ''
+  subscriptionGroup.value = item?.custom_group ? item.group : ''
   subscriptionCategories.value = (item?.categories || []).map(category => `${category.name}=${category.pattern}`).join('\n')
   subscriptionTypes.value = [...(item?.overrides?.types || [])]
   subscriptionRename.value = (item?.overrides?.rename || []).map(rule => `${rule.pattern} => ${rule.replacement}`).join('\n')
@@ -451,8 +453,7 @@ function editSubscription(item?: Subscription) {
   subscriptionTfo.value = item?.overrides?.properties?.tcp_fast_open || false
   subscriptionUdpFragment.value = item?.overrides?.properties?.udp_fragment || false
   subscriptionAdvanced.value = Boolean(item && (
-    item.include || item.exclude || item.categories.length
-    || (item.group && item.group !== `${item.id}-auto`)
+    item.include || item.exclude || item.categories.length || item.custom_group
     || item.overrides.types.length || item.overrides.rename.length
     || item.overrides.sort !== 'source' || Object.values(item.overrides.properties).some(Boolean)
   ))
