@@ -2,6 +2,12 @@
 
 本项目按发布 tag 记录稳定版本;完整提交见 git 历史。
 
+## 2026-07-10 — v2.0.1(GMS route-options 兼容修复)
+
+- 修复 GMS/FCM `5228-5230` 迁移候选在 sing-box 1.12.25 下校验失败:不再把已废弃的 `override_address` 写进 direct outbound,改由首条 `action: route` 的 route-options 改写到 `mtalk.google.com`。
+- 迁移会清理 v2.0.0 产生的废弃字段,保留原端口并继续使用专用 `gms-mtalk` direct 出站;校验失败时输出真实 sing-box 错误后回滚。
+- 功能测试改用非 TLS 二进制载荷验证 GMS 入站目标改写,并要求生产模板通过锁定版 sing-box 1.12.25 的真实 schema 检查。
+
 ## 2026-07-10 — v2.0.0(PWA 管理端、统一控制层与 Bot 高频交互优化)
 
 - 新增内网 HTTPS PWA 管理端 `pdg-admin`:移动端/桌面自适应管理概览、出口、故障组、测速、默认出口、域名分流、规则集、路由模拟、活动连接和服务日志;Vue 3 + TypeScript 前端构建后作为静态资源部署,VPS 无 Node.js 运行时依赖。

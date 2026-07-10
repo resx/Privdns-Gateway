@@ -4,9 +4,9 @@
 #   「单入口 + 按 TLS SNI 把流量分到不同出口」。
 #
 # 做法(全本地、可在 CI / 干净机跑, 仅需 python3 + 官方 sing-box):
-#   1) 起 3 个本地 mock SOCKS5 当"出口", 各自记录收到的目标域名;
+#   1) 起 3 个本地 mock SOCKS5 出口和一个原始 TCP sink;
 #   2) 用 direct 入口(开 sniff, 与生产同款)起 sing-box, 按域名规则分到出口 A/B、其余走 final;
-#   3) 按不同 SNI 发 TLS ClientHello 到入口, 断言每个 SNI 被嗅探并路由到正确出口。
+#   3) 按不同 SNI 验证常规分流,再用非 TLS 二进制载荷验证 GMS 入站经 route-options 改写到 sink。
 #
 # 退出码 0 = 通过; 非 0 = 失败(并打印 sing-box 输出便于排查)。
 # ─────────────────────────────────────────────────────────────────────────────
@@ -41,33 +41,53 @@ else
   SB="$(echo "$WORK"/sing-box-*/sing-box)"
 fi
 
+# 生产模板必须由锁定版 sing-box 真正验过；仅做 JSON 解析抓不到废弃字段硬拒绝。
+sed -e 's/__SERVER_IP__/203.0.113.1/g' \
+    "$ROOT/deploy/singbox/config.json.tmpl" > "$WORK/production.json"
+"$SB" check -c "$WORK/production.json" || fail "生产 sing-box 模板未通过锁定版 schema 校验"
+
 # ── 2. 起 3 个 mock SOCKS5 出口 ──
 LOGA="$WORK/a.log"; LOGB="$WORK/b.log"; LOGD="$WORK/d.log"
 : > "$LOGA"; : > "$LOGB"; : > "$LOGD"
 python3 "$HERE/mock_socks.py" 11080 "$LOGA" & PIDS+=($!)
 python3 "$HERE/mock_socks.py" 11081 "$LOGB" & PIDS+=($!)
 python3 "$HERE/mock_socks.py" 11082 "$LOGD" & PIDS+=($!)
+GMSLOG="$WORK/gms.log"; : > "$GMSLOG"
+python3 - "$GMSLOG" <<'PY' &
+import socket, sys
+server = socket.socket(); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", 12028)); server.listen(4)
+while True:
+    conn, _ = server.accept()
+    data = conn.recv(1024)
+    if data:
+        with open(sys.argv[1], "ab") as log:
+            log.write(data + b"\n")
+    conn.close()
+PY
+PIDS+=($!)
 
-# ── 3. 写 sing-box 测试配置: direct 入口开 sniff, 按域名分流, 其余走 final ──
+# ── 3. 写 sing-box 测试配置: 常规入口按 SNI 分流;GMS 入口不嗅探,按 inbound 改写目标 ──
 cat > "$WORK/sb.json" <<'JSON'
 {
   "log": { "level": "error" },
   "inbounds": [
     { "type": "direct", "tag": "in", "listen": "127.0.0.1", "listen_port": 18443,
       "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms" },
-    { "type": "direct", "tag": "in-gms", "network": "tcp", "listen": "127.0.0.1", "listen_port": 15228,
-      "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms" }
+    { "type": "direct", "tag": "in-gms", "network": "tcp", "listen": "127.0.0.1", "listen_port": 15228 }
   ],
   "outbounds": [
     { "type": "socks", "tag": "exitA",       "server": "127.0.0.1", "server_port": 11080, "version": "5" },
     { "type": "socks", "tag": "exitB",       "server": "127.0.0.1", "server_port": 11081, "version": "5" },
-    { "type": "socks", "tag": "exitDefault", "server": "127.0.0.1", "server_port": 11082, "version": "5" }
+    { "type": "socks", "tag": "exitDefault", "server": "127.0.0.1", "server_port": 11082, "version": "5" },
+    { "type": "direct", "tag": "gms-mtalk" }
   ],
   "route": {
     "rules": [
+      { "inbound": ["in-gms"], "action": "route", "outbound": "gms-mtalk",
+        "override_address": "127.0.0.1", "override_port": 12028 },
       { "domain_suffix": ["alpha.test"], "outbound": "exitA" },
-      { "domain_suffix": ["beta.test"],  "outbound": "exitB" },
-      { "domain_suffix": ["mtalk.google.com"], "outbound": "exitB" }
+      { "domain_suffix": ["beta.test"],  "outbound": "exitB" }
     ],
     "final": "exitDefault"
   }
@@ -99,13 +119,20 @@ check_case alpha.test "$LOGA" "exitA(域名规则)"
 check_case beta.test  "$LOGB" "exitB(域名规则)"
 check_case gamma.test "$LOGD" "exitDefault(final 兜底)"
 
-note "用例: GMS 推送端口入站(模拟 :5228, mtalk 经嗅探按域名分流)"
-check_case mtalk.google.com "$LOGB" "exitB(GMS 入站+域名规则)" 15228
+note "用例: GMS 推送端口入站(非 TLS 载荷按 inbound 经 route-options 改写目标)"
+python3 - <<'PY'
+import socket
+with socket.create_connection(("127.0.0.1", 15228), timeout=3) as conn:
+    conn.sendall(b"PDG-MTALK-PROBE")
+PY
+gms_ok=0
+for _ in $(seq 1 30); do grep -q 'PDG-MTALK-PROBE' "$GMSLOG" 2>/dev/null && { gms_ok=1; break; }; sleep 0.1; done
+[[ "$gms_ok" == 1 ]] || { cat "$WORK/sb.out" >&2; fail "GMS route-options 未把二进制载荷送到目标 sink"; }
+note "  非 TLS mtalk 载荷 → gms-mtalk(route-options 改写) ✓"
 
 # 反向断言: 命中规则的 SNI 不应串到别的出口
 grep -q alpha.test "$LOGB" "$LOGD" 2>/dev/null && fail "alpha.test 串到了错误出口"
 grep -q beta.test  "$LOGA" "$LOGD" 2>/dev/null && fail "beta.test 串到了错误出口"
-grep -q mtalk.google.com "$LOGA" "$LOGD" 2>/dev/null && fail "mtalk.google.com 串到了错误出口"
 
 echo
-echo "✅ 功能测试通过: TLS SNI 嗅探 + 按域名多出口分流 + final 兜底 + GMS 端口入站 均正确。"
+echo "✅ 功能测试通过: TLS SNI 分流 + final 兜底 + GMS 非 TLS 入站目标改写均正确。"

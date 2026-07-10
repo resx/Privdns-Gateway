@@ -141,7 +141,7 @@ def check_gms():
     """GMS/FCM 推送端口(5228-5230)是否完整且路由正确。只读、不触发迁移: 老装第一次 pdg update
     跑在旧脚本里, 迁移要等下一次 root 管理类命令; 没落地前用 warn 提示(不 fail, 自定义防火墙用户合法缺席)。
     ⚠️ 早期迁移只补了 5228-5230 嗅探入站但路由被 reject 自环规则杀掉(mtalk 是私有 mcs 协议, 无 SNI 嗅探不到);
-    本项同时校验 gms-mtalk 改写出站 + route 首条按 inbound 口钉到该出站——缺任一项等同未生效。"""
+    本项同时校验 gms-mtalk direct 出站 + route 首条按 inbound 口执行目标改写——缺任一项等同未生效。"""
     try:
         sb = json.load(open(SB))
         have = {i.get("listen_port") for i in sb.get("inbounds", [])}
@@ -153,9 +153,13 @@ def check_gms():
         sniffed = any(i.get("listen_port") in (5228, 5229, 5230) and i.get("sniff") for i in sb.get("inbounds", []))
     except Exception:  # noqa: BLE001
         sniffed = False
-    have_gms_out = any(o.get("tag") == "gms-mtalk" for o in sb.get("outbounds", []))
+    have_gms_out = any(o.get("tag") == "gms-mtalk" and o.get("type") == "direct"
+                       and "override_address" not in o and "override_port" not in o
+                       for o in sb.get("outbounds", []))
     have_rule = any(r.get("inbound") == ["in-gms-5228", "in-gms-5229", "in-gms-5230"]
-                    and r.get("outbound") == "gms-mtalk" for r in sb.get("route", {}).get("rules", []))
+                    and r.get("action") == "route" and r.get("outbound") == "gms-mtalk"
+                    and r.get("override_address") == "mtalk.google.com"
+                    for r in sb.get("route", {}).get("rules", []))
     _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "input"])
     if not out:
         _, out, _ = _run(["nft", "list", "chain", "inet", "filter", "input"])
@@ -167,11 +171,11 @@ def check_gms():
     fw_ok = any("saddr" in ln and "5228" in ln and "tcp" in ln and "accept" in ln
                 for ln in out.splitlines())      # 覆盖原装形态(内网来源 + 5228-5230 区间)即可
     if sb_ok and not sniffed and have_gms_out and have_rule and fw_ok:
-        return ("ok", "GMS 推送", "GMS/FCM 5228-5230 已启用(mtalk 改写出站生效)")
+        return ("ok", "GMS 推送", "GMS/FCM 5228-5230 已启用(route-options 目标改写生效)")
     if sb_ok and (sniffed or not have_gms_out or not have_rule):
         return ("warn", "GMS 推送",
                 "旧版 GMS 迁移仅补了 5228-5230 入站但路由会被自环规则杀掉(mtalk 私有协议嗅探不到 SNI)→ "
-                "GMS/Play Store App 连不上。运行 sudo pdg restart 或 sudo pdg 触发重新迁移补 gms-mtalk 改写出站。")
+                "GMS/Play Store App 连不上。运行 sudo pdg restart 或 sudo pdg 触发迁移补 route-options 目标改写。")
     return ("warn", "GMS 推送", "GMS/FCM 推送端口未完整启用; 运行 sudo pdg restart 或 sudo pdg 触发迁移。"
                                 "若使用自定义防火墙, 请手动放行内网卡段 → 5228-5230/tcp。")
 

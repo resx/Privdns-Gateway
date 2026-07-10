@@ -92,13 +92,36 @@ for i in c["inbounds"]:
         assert i["type"] == "direct" and not i.get("sniff") and not i.get("sniff_override_destination"), i
         assert i["network"] == "tcp" and i["tag"] == "in-gms-%d" % i["listen_port"], i
 out = next(o for o in c["outbounds"] if o.get("tag") == "gms-mtalk")
-assert out["type"] == "direct" and out["override_address"] == "mtalk.google.com", out
+assert out == {"type": "direct", "tag": "gms-mtalk"}, out
 rule = c["route"]["rules"][0]
-assert rule == {"inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"], "outbound": "gms-mtalk"}, rule
+assert rule == {
+    "inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"],
+    "action": "route", "outbound": "gms-mtalk", "override_address": "mtalk.google.com",
+}, rule
 PY
 snap="$(cat "$WORK/sb.json")"
 migrate_singbox_gms "$WORK/sb.json"
 [[ "$(cat "$WORK/sb.json")" == "$snap" ]] && ok "sb 幂等(二跑不变)" || bad "sb 二跑改动了文件"
+
+# ── sing-box: v2.0.0 把 override_address 错放 direct outbound → 迁到 route-options ──
+cp "$WORK/sb.json" "$WORK/sb-deprecated.json"
+python3 - "$WORK/sb-deprecated.json" <<'PY'
+import json, sys
+p = sys.argv[1]; c = json.load(open(p))
+out = next(o for o in c["outbounds"] if o.get("tag") == "gms-mtalk")
+out["override_address"] = "mtalk.google.com"; out["domain_strategy"] = "prefer_ipv4"
+r = c["route"]["rules"][0]; r.pop("action", None); r.pop("override_address", None)
+json.dump(c, open(p, "w"), indent=2)
+PY
+migrate_singbox_gms "$WORK/sb-deprecated.json"
+python3 - "$WORK/sb-deprecated.json" <<'PY' && ok "sb 废弃 outbound 改写 → route-options" || bad "sb 未清理废弃 override 字段"
+import json, sys
+c = json.load(open(sys.argv[1]))
+out = next(o for o in c["outbounds"] if o.get("tag") == "gms-mtalk")
+assert "override_address" not in out and "domain_strategy" not in out, out
+rule = c["route"]["rules"][0]
+assert rule.get("action") == "route" and rule.get("override_address") == "mtalk.google.com", rule
+PY
 
 # ── sing-box: check 失败 → 还原不重启 ──
 sed 's/"listen_port": 5228/"listen_port": 15228/; s/"listen_port": 5229/"listen_port": 15229/; s/"listen_port": 5230/"listen_port": 15230/; s/in-gms-5/in-gms-x5/g' "$WORK/sb.json" > "$WORK/sb2.json"

@@ -56,10 +56,10 @@ def gms_case(ports, nft_out, legacy_sniff=False):
         gms_inbounds.append(inbound)
     config = {
         "inbounds": gms_inbounds,
-        "outbounds": [{"type": "direct", "tag": "gms-mtalk", "override_address": "mtalk.google.com"}],
+        "outbounds": [{"type": "direct", "tag": "gms-mtalk"}],
         "route": {"rules": [{
             "inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"],
-            "outbound": "gms-mtalk",
+            "action": "route", "outbound": "gms-mtalk", "override_address": "mtalk.google.com",
         }]},
     }
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:

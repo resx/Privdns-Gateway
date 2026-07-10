@@ -34,14 +34,15 @@ with tempfile.TemporaryDirectory() as directory:
     config = {
         "outbounds": [
             {"type": "direct", "tag": "jp"},
-            {"type": "direct", "tag": "gms-mtalk", "override_address": "mtalk.google.com"},
+            {"type": "direct", "tag": "gms-mtalk"},
             {"type": "shadowsocks", "tag": "hk", "server": "hk.example.com", "server_port": 443,
              "method": "aes-128-gcm", "password": "secret"},
             {"type": "urltest", "tag": "auto", "outbounds": ["hk", "jp"]},
         ],
         "route": {
             "rules": [
-                {"inbound": ["in-gms-5228"], "outbound": "gms-mtalk"},
+                {"inbound": ["in-gms-5228"], "action": "route", "outbound": "gms-mtalk",
+                 "override_address": "mtalk.google.com"},
                 {"action": "reject", "ip_cidr": ["203.0.113.1/32"]},
                 {"rule_set": "rs_media", "outbound": "hk"},
                 {"domain_suffix": ["old.example"], "outbound": "hk"},

@@ -31,12 +31,12 @@
   ],
   "outbounds": [
     { "type": "direct", "tag": "jp" },
-    { "type": "direct", "tag": "gms-mtalk",
-      "override_address": "mtalk.google.com", "domain_strategy": "prefer_ipv4" }
+    { "type": "direct", "tag": "gms-mtalk" }
   ],
   "route": {
     "rules": [
-      { "inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"], "outbound": "gms-mtalk" },
+      { "inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"],
+        "action": "route", "outbound": "gms-mtalk", "override_address": "mtalk.google.com" },
       { "ip_cidr": ["__SERVER_IP__/32", "127.0.0.0/8"], "action": "reject" }
     ],
     "final": "jp"

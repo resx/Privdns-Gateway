@@ -241,11 +241,11 @@ PY
   fi
 }
 
-# 老装迁移: sing-box 补 5228-5230 direct 入站(GMS/FCM 推送端口 mtalk.google.com) + gms-mtalk 改写出站。
+# 老装迁移: sing-box 补 5228-5230 direct 入站(GMS/FCM 推送端口 mtalk.google.com) + mtalk 目标改写。
 # ⚠️ mtalk 是私有 mcs 二进制协议(非 TLS/HTTP), 无 SNI/无 Host → sniff 拿不到域名、嗅不到。
-#    入站不设 sniff; 流量靠 route.rules 按 inbound 口钉到 gms-mtalk 出站(override_address 改写目的到
-#    mtalk.google.com, 保留原端口), 该规则必须排在 SERVER_IP reject 自环规则之前, 否则连接进来即被杀。
-#    网关本机解析 mtalk.google.com 走真实上游(127.0.0.1 非内网卡源, 不进劫持分支), 不会自环。
+#    入站不设 sniff; 首条 route action 按 inbound 口改写目标到 mtalk.google.com 并走 gms-mtalk direct。
+#    目标改写必须放 route-options,不能放 direct outbound:后者从 sing-box 1.11 起废弃且默认拒绝加载。
+#    该规则必须排在 SERVER_IP reject 自环规则之前,否则连接进来即被杀。
 # check 不过/起不来自动还原。$1 可指定文件(供测试), 默认 /etc/sing-box/config.json。
 # shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
 migrate_singbox_gms(){
@@ -253,13 +253,26 @@ migrate_singbox_gms(){
   [[ -f "$f" ]] || return 0
   grep -q '"listen_port": 5228' "$f" || grep -q '"sniff_override_destination"' "$f" || return 0  # 不是本项目形态的配置 → 不动
   command -v sing-box >/dev/null || return 0
-  local need_migrate=0
-  grep -q '"listen_port": 5228' "$f" || need_migrate=1                     # 缺 5228-5230 入站
-  grep -q '"inbound":.*in-gms-5228' "$f" || need_migrate=1                   # 缺 inbound 口路由(旧 sniff 形态或无路由)
-  grep -q '"gms-mtalk"' "$f" || need_migrate=1                              # 缺 gms-mtalk 出站
-  grep -qE '"in-gms-5228".*"sniff"|sniff.*in-gms-5228' "$f" && need_migrate=1  # 仍是旧 sniff 形态 → 升级
-  [[ "$need_migrate" == 0 ]] && return 0                                     # 全齐且为新形态 → 幂等退出
-  c_g "检测到 sing-box GMS 推送配置需更新 → 补 5228-5230 入站 + gms-mtalk 改写出站…"
+  # 结构化判断完整目标形态;同时识别 v2.0.0 曾写入 direct outbound 的废弃改写字段。
+  if python3 - "$f" <<'PY'
+import json, sys
+c = json.load(open(sys.argv[1]))
+tags = ["in-gms-5228", "in-gms-5229", "in-gms-5230"]
+ins = c.get("inbounds", [])
+ports_ok = all(any(i.get("tag") == tag and i.get("listen_port") == port
+                       and not i.get("sniff") and not i.get("sniff_override_destination")
+                   for i in ins) for tag, port in zip(tags, (5228, 5229, 5230)))
+gms = [o for o in c.get("outbounds", []) if o.get("tag") == "gms-mtalk"]
+out_ok = len(gms) == 1 and gms[0].get("type") == "direct" \
+         and "override_address" not in gms[0] and "override_port" not in gms[0]
+rule_ok = any(r.get("inbound") == tags and r.get("action") == "route"
+              and r.get("outbound") == "gms-mtalk"
+              and r.get("override_address") == "mtalk.google.com"
+              for r in c.get("route", {}).get("rules", []))
+sys.exit(0 if ports_ok and out_ok and rule_ok else 1)
+PY
+  then return 0; fi
+  c_g "检测到 sing-box GMS 推送配置需更新 → 补 5228-5230 入站 + route-options 目标改写…"
   local bak; bak="$f.pregms.$(date +%s)"
   if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
     c_y "  备份失败(磁盘满?), 中止、不动现网。"; rm -f "$bak" 2>/dev/null; return 0
@@ -279,24 +292,32 @@ for off, port in enumerate((5228, 5229, 5230)):
     ins.insert(idx + off, {"type": "direct", "tag": "in-gms-%d" % port, "network": "tcp",
                            "listen": "0.0.0.0", "listen_port": port})
 c["inbounds"] = ins
-# 2) 加 gms-mtalk 出站(去重)
-if not any(o.get("tag") == "gms-mtalk" for o in outs):
-    outs.append({"type": "direct", "tag": "gms-mtalk",
-                 "override_address": "mtalk.google.com", "domain_strategy": "prefer_ipv4"})
+# 2) gms-mtalk 只负责 direct 拨号;清除 v2.0.0 错放在 outbound 的废弃 override 字段
+outs = [o for o in outs if o.get("tag") != "gms-mtalk"]
+outs.append({"type": "direct", "tag": "gms-mtalk"})
 c["outbounds"] = outs
-# 3) route.rules 首条按 inbound 口钉到 gms-mtalk(必须在 SERVER_IP reject 自环规则之前)
-rules = [r for r in rules if not (r.get("inbound") == ["in-gms-5228", "in-gms-5229", "in-gms-5230"])]
-rules.insert(0, {"inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"], "outbound": "gms-mtalk"})
+# 3) route 首条完成目标改写并选 direct 出站(必须在 SERVER_IP reject 自环规则之前)
+tags = ["in-gms-5228", "in-gms-5229", "in-gms-5230"]
+def is_gms_rule(rule):
+    inbound = rule.get("inbound", [])
+    inbound = inbound if isinstance(inbound, list) else [inbound]
+    return any(tag in inbound for tag in tags)
+rules = [r for r in rules if not is_gms_rule(r)]
+rules.insert(0, {"inbound": tags, "action": "route", "outbound": "gms-mtalk",
+                 "override_address": "mtalk.google.com"})
 c["route"]["rules"] = rules
 json.dump(c, open(p, "w"), ensure_ascii=False, indent=2)
 PY
   then c_y "  生成失败 → 还原。"; cp -a "$bak" "$f"; return 0; fi
-  if ! sing-box check -c "$f" >/dev/null 2>&1; then
-    c_y "  sing-box check 未过 → 还原、不重启。"; cp -a "$bak" "$f"; return 0
+  local check_out
+  if ! check_out=$(sing-box check -c "$f" 2>&1); then
+    c_y "  sing-box check 未过 → 还原、不重启。"
+    printf '%s\n' "$check_out" | tail -n 8 | sed 's/^/    /'
+    cp -a "$bak" "$f"; return 0
   fi
   systemctl reset-failed sing-box 2>/dev/null; systemctl restart sing-box 2>/dev/null; sleep 2
   if [[ "$(systemctl is-active sing-box 2>/dev/null)" == active ]]; then
-    c_g "  ✅ 已更新 GMS 推送配置(5228-5230 入站 + gms-mtalk 改写出站)。"
+    c_g "  ✅ 已更新 GMS 推送配置(5228-5230 入站 + route-options 目标改写)。"
   else
     c_y "  ⚠️ sing-box 重启失败 → 还原。"; cp -a "$bak" "$f"
     systemctl reset-failed sing-box 2>/dev/null; systemctl restart sing-box 2>/dev/null
