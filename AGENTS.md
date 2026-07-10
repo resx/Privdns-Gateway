@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-`install.sh` provisions the gateway. DNS and traffic templates are `deploy/mosdns/config.yaml` and `deploy/singbox/config.json.tmpl`. `deploy/bot/` contains the Telegram UI, shared control/services, lifecycle CLI, and diagnostics. `deploy/admin/` holds the HTTPS API, unit, and built PWA; Vue/TypeScript source is in `web/`. `panel/zashboard/` is a pinned upstream static distribution. Shell helpers are in `lib/`, tests in `tests/`, and operator docs in `docs/`. Avoid `docs/images/` and `lib/versions.sh` unless changing assets or pinned binaries.
+`install.sh` provisions the gateway. DNS and traffic templates are `deploy/mosdns/config.yaml` and `deploy/singbox/config.json.tmpl`. `deploy/bot/` contains the Telegram UI, shared control/services, lifecycle CLI, and diagnostics. `deploy/admin/` holds the HTTPS API, unit, and built PWA; Vue/TypeScript source is in `web/`. Shell helpers are in `lib/`, tests in `tests/`, and operator docs are in `docs/`. Avoid `docs/images/` and `lib/versions.sh` unless changing assets or pinned binaries.
 
 ## Core Business Workflows
 
@@ -38,4 +38,4 @@ mosdns is the policy engine, sing-box the data plane, `pdg_service.py` the manag
 
 ## Agent-Specific Instructions
 
-Keep changes minimal. Never write sing-box configuration outside `pdg_control.py` or expose port 9090. Rebuild `deploy/admin/web/` after `web/` changes. Do not hand-edit Zashboard assets; retain its license and release record. Test migrations, API authentication, and routing; preserve unrelated edits.
+Keep changes minimal. Never write sing-box configuration outside `pdg_control.py` or expose port 9090. Rebuild `deploy/admin/web/` after `web/` changes. Test migrations, API authentication, and routing; preserve unrelated edits.

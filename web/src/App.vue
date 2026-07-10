@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  Activity, Database, Gauge, House, Network, Plus, RefreshCw, Route, Search,
+  Server, Settings, Trash2,
+} from '@lucide/vue'
 
-type Page = 'overview' | 'exits' | 'rules' | 'runtime' | 'system'
+type Page = 'overview' | 'nodes' | 'rules' | 'resources' | 'runtime' | 'system'
 
 type ServiceState = Record<string, string>
 interface Overview {
@@ -18,6 +22,8 @@ interface Exit {
   server_port: number | null
   tls: boolean
   members: string[]
+  mode: 'auto' | 'manual' | null
+  selected: string | null
   default: boolean
   deletable: boolean
   references: number
@@ -41,6 +47,15 @@ interface DelayResult {
   tag: string
   ok: boolean
   delay: number | null
+  target: string
+  error: string | null
+  elapsed?: number
+}
+interface SubscriptionOverrides {
+  types: string[]
+  rename: { pattern: string; replacement: string }[]
+  sort: 'source' | 'name'
+  properties: Record<string, boolean>
 }
 interface Subscription {
   id: string
@@ -52,9 +67,11 @@ interface Subscription {
   group: string
   groups: { tag: string; label: string; count: number }[]
   categories: { name: string; pattern: string }[]
+  overrides: SubscriptionOverrides
   count: number
   skipped: number
   updated_at: string | null
+  last_error: string | null
 }
 interface SubscriptionPreview {
   id: string
@@ -71,6 +88,7 @@ interface SubscriptionPreview {
   nodes: { tag: string; type: string; server: string; server_port: number }[]
   groups: { tag: string; label: string; count: number; master: boolean }[]
   categories: { name: string; pattern: string }[]
+  overrides: SubscriptionOverrides
 }
 interface Ruleset {
   tag: string
@@ -80,6 +98,14 @@ interface Ruleset {
   format: string
   count: number | null
   available: boolean
+  updated_at: string | null
+  last_error: string | null
+}
+interface Resources {
+  subscriptions: Subscription[]
+  rulesets: Ruleset[]
+  geosite: { available: boolean; updated_at: string | null; files: number }
+  project: { current: string; latest: string | null; update_available: boolean }
 }
 interface RouteResult {
   domain: string
@@ -148,10 +174,18 @@ const subscriptionInclude = ref('')
 const subscriptionExclude = ref('')
 const subscriptionGroup = ref('')
 const subscriptionCategories = ref('')
+const subscriptionTypes = ref<string[]>([])
+const subscriptionRename = ref('')
+const subscriptionSort = ref<'source' | 'name'>('source')
+const subscriptionTfo = ref(false)
+const subscriptionUdpFragment = ref(false)
 const subscriptionPreview = ref<SubscriptionPreview | null>(null)
+const testTarget = ref('google')
+const resources = ref<Resources | null>(null)
+const resourceBusy = ref('')
 const subscriptionPreviewInput = ref('')
 
-const concreteExits = computed(() => exits.value.filter(item => item.type !== 'urltest'))
+const concreteExits = computed(() => exits.value.filter(item => !item.members.length))
 
 const filteredRules = computed(() => {
   const query = search.value.trim().toLowerCase()
@@ -159,13 +193,15 @@ const filteredRules = computed(() => {
   return rules.value.filter(item => `${item.label} ${item.target} ${item.kind}`.toLowerCase().includes(query))
 })
 
-const navItems: { id: Page; label: string; icon: string }[] = [
-  { id: 'overview', label: '概览', icon: '◫' },
-  { id: 'exits', label: '出口', icon: '⇄' },
-  { id: 'rules', label: '分流', icon: '⌘' },
-  { id: 'runtime', label: '连接', icon: '↯' },
-  { id: 'system', label: '系统', icon: '⚙' },
+const navItems = [
+  { id: 'overview' as Page, label: '概览', icon: House },
+  { id: 'nodes' as Page, label: '节点', icon: Server },
+  { id: 'rules' as Page, label: '分流', icon: Route },
+  { id: 'resources' as Page, label: '资源', icon: Database },
+  { id: 'runtime' as Page, label: '连接', icon: Activity },
+  { id: 'system' as Page, label: '系统', icon: Settings },
 ]
+const protocolOptions = ['shadowsocks', 'vmess', 'trojan', 'vless', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'shadowtls', 'socks', 'http']
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -300,12 +336,14 @@ async function removeExit(item: Exit) {
   }
 }
 
-async function testExits() {
+async function testExits(tags?: string[]) {
   testing.value = true
   error.value = ''
   try {
-    const result = await api<DelayResult[]>('/api/v1/exits/test', { method: 'POST', body: '{}' })
-    delays.value = Object.fromEntries(result.map(item => [item.tag, item]))
+    const result = await api<DelayResult[]>('/api/v1/exits/test', {
+      method: 'POST', body: JSON.stringify({ ...(tags ? { tags } : {}), target: testTarget.value }),
+    })
+    delays.value = { ...delays.value, ...Object.fromEntries(result.map(item => [item.tag, item])) }
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
@@ -323,6 +361,13 @@ function categoryRules() {
   })
 }
 
+function renameRules() {
+  return subscriptionRename.value.split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const separator = line.indexOf('=>')
+    return { pattern: separator >= 0 ? line.slice(0, separator).trim() : line, replacement: separator >= 0 ? line.slice(separator + 2).trim() : '' }
+  })
+}
+
 function subscriptionPayload() {
   return {
     ...(subscriptionUrl.value.trim() ? { url: subscriptionUrl.value.trim() } : {}),
@@ -331,6 +376,12 @@ function subscriptionPayload() {
     exclude: subscriptionExclude.value.trim(),
     group: subscriptionGroup.value.trim(),
     categories: categoryRules(),
+    overrides: {
+      types: subscriptionTypes.value,
+      rename: renameRules(),
+      sort: subscriptionSort.value,
+      properties: { tcp_fast_open: subscriptionTfo.value, udp_fragment: subscriptionUdpFragment.value },
+    },
   }
 }
 
@@ -346,6 +397,11 @@ function editSubscription(item?: Subscription) {
   subscriptionExclude.value = item?.exclude || ''
   subscriptionGroup.value = item?.group || ''
   subscriptionCategories.value = (item?.categories || []).map(category => `${category.name}=${category.pattern}`).join('\n')
+  subscriptionTypes.value = [...(item?.overrides?.types || [])]
+  subscriptionRename.value = (item?.overrides?.rename || []).map(rule => `${rule.pattern} => ${rule.replacement}`).join('\n')
+  subscriptionSort.value = item?.overrides?.sort || 'source'
+  subscriptionTfo.value = item?.overrides?.properties?.tcp_fast_open || false
+  subscriptionUdpFragment.value = item?.overrides?.properties?.udp_fragment || false
   subscriptionPreview.value = null
   subscriptionPreviewInput.value = ''
   showSubscription.value = true
@@ -467,6 +523,23 @@ function editGroup(item?: Exit) {
   showGroup.value = true
 }
 
+function groupSelectionChange(item: Exit, event: Event) {
+  setGroupSelection(item, (event.target as HTMLSelectElement).value)
+}
+
+async function setGroupSelection(item: Exit, selected: string) {
+  error.value = ''
+  try {
+    await api(`/api/v1/groups/${encodeURIComponent(item.tag)}/selection`, {
+      method: 'PUT', body: JSON.stringify({ selected: selected || null }),
+    })
+    flash(selected ? `${item.tag} 已固定到 ${selected}` : `${item.tag} 已恢复自动优选`)
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
 async function saveGroup() {
   error.value = ''
   try {
@@ -570,6 +643,56 @@ async function removeRuleset(item: Ruleset) {
   }
 }
 
+async function loadResources() {
+  error.value = ''
+  try {
+    resources.value = await api<Resources>('/api/v1/resources')
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function refreshResource(kind: 'subscriptions' | 'rulesets' | 'geosite') {
+  resourceBusy.value = kind
+  error.value = ''
+  try {
+    const path = kind === 'subscriptions' ? '/api/v1/subscriptions/refresh' : kind === 'rulesets' ? '/api/v1/rulesets/refresh' : '/api/v1/resources/geosite/refresh'
+    const result = await api<{ ok?: boolean; error?: string }[] | { ok: boolean }>(path, { method: 'POST', body: '{}' })
+    const failed = Array.isArray(result) ? result.filter(item => !item.ok) : []
+    const label = kind === 'subscriptions' ? '节点订阅' : kind === 'rulesets' ? '远程规则集' : 'Geosite'
+    flash(failed.length ? `${label}：${failed.length} 个刷新失败` : `${label} 已刷新`)
+    if (failed.length) error.value = failed.map(item => item.error || '刷新失败').join('；')
+    await Promise.all([loadAll(), loadResources()])
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    resourceBusy.value = ''
+  }
+}
+
+async function checkProjectUpdate() {
+  resourceBusy.value = 'project'
+  try {
+    const project = await api<Resources['project']>('/api/v1/resources/project/check', { method: 'POST', body: '{}' })
+    if (resources.value) resources.value.project = project
+    flash(project.update_available ? `发现新版本 ${project.latest}` : '当前已是最新版本')
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    resourceBusy.value = ''
+  }
+}
+
+async function startProjectUpdate() {
+  if (!window.confirm('确认后台执行 pdg update？服务会短暂重启，失败将自动回滚。')) return
+  try {
+    await api('/api/v1/resources/project/update', { method: 'POST', body: '{}' })
+    flash('更新任务已启动，请稍后重新连接')
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
 async function loadRuntime() {
   error.value = ''
   try {
@@ -607,22 +730,14 @@ async function selectPage(next: Page) {
     await loadRuntime()
     runtimeTimer = window.setInterval(loadRuntime, 5000)
   }
+  if (next === 'resources') await loadResources()
   if (next === 'system') await loadLogs()
 }
 
-function openZashboard() {
-  const parameters = new URLSearchParams({
-    hostname: location.hostname,
-    port: location.port || '443',
-    https: '1',
-    secondaryPath: '/zashboard/api',
-    secret: token.value,
-    type: 'clash',
-    label: 'PrivDNS Gateway',
-    disableUpgradeCore: '1',
-    disableTunMode: '1',
-  })
-  window.open(`/zashboard/#/setup?${parameters}`, '_blank', 'noopener,noreferrer')
+function formatTime(value?: string | null) {
+  if (!value) return '尚未更新'
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN', { hour12: false })
 }
 
 function formatBytes(value: number) {
@@ -670,7 +785,7 @@ onBeforeUnmount(() => {
       </div>
       <nav>
         <button v-for="item in navItems" :key="item.id" :class="{ active: page === item.id }" @click="selectPage(item.id)">
-          <span>{{ item.icon }}</span>{{ item.label }}
+          <component :is="item.icon" :size="19" />{{ item.label }}
         </button>
       </nav>
       <button class="logout" @click="logout">退出管理端</button>
@@ -682,7 +797,7 @@ onBeforeUnmount(() => {
           <p class="eyebrow">PRIVDNS GATEWAY</p>
           <h1>{{ navItems.find(item => item.id === page)?.label }}</h1>
         </div>
-        <button class="icon-button" :disabled="loading" title="刷新" @click="loadAll">↻</button>
+        <button class="icon-button" :disabled="loading" title="刷新" @click="loadAll"><RefreshCw :size="19" /></button>
       </header>
 
       <div v-if="error" class="banner error-message"><span>{{ error }}</span><button @click="error = ''">×</button></div>
@@ -716,13 +831,15 @@ onBeforeUnmount(() => {
         </section>
       </template>
 
-      <template v-if="page === 'exits'">
-        <div class="section-actions">
-          <button class="secondary" @click="openZashboard">实时节点</button>
-          <button class="secondary" :disabled="testing" @click="testExits">{{ testing ? '测速中…' : '批量测速' }}</button>
-          <button class="secondary" @click="editSubscription()">＋ 节点订阅</button>
-          <button class="secondary" @click="editGroup()">＋ 故障组</button>
-          <button class="primary" @click="showAdd = !showAdd; preview = null">＋ 添加出口</button>
+      <template v-if="page === 'nodes'">
+        <div class="section-actions node-actions">
+          <select v-model="testTarget" class="target-select">
+            <option value="google">Google 204</option><option value="cloudflare">Cloudflare 204</option><option value="apple">Apple</option>
+          </select>
+          <button class="secondary" :disabled="testing" @click="testExits()"><Gauge :size="17" />{{ testing ? '测速中…' : '批量测速' }}</button>
+          <button class="secondary" @click="editSubscription()"><Database :size="17" />节点订阅</button>
+          <button class="secondary" @click="editGroup()"><Network :size="17" />节点组</button>
+          <button class="primary" @click="showAdd = !showAdd; preview = null"><Plus :size="17" />添加节点</button>
         </div>
         <section v-if="showSubscription" class="panel add-panel">
           <div class="section-title">
@@ -736,6 +853,18 @@ onBeforeUnmount(() => {
             <input v-model="subscriptionInclude" placeholder="包含正则，例如 香港|HK" />
             <input v-model="subscriptionExclude" placeholder="排除正则，例如 过期|剩余流量" />
             <textarea v-model="subscriptionCategories" rows="3" placeholder="附加分类，每行 名称=正则，例如：&#10;香港=香港|HK&#10;台湾=台湾|TW"></textarea>
+            <fieldset class="override-box">
+              <legend>结构化覆写</legend>
+              <div class="protocol-picker">
+                <label v-for="protocol in protocolOptions" :key="protocol"><input v-model="subscriptionTypes" type="checkbox" :value="protocol" />{{ protocol }}</label>
+              </div>
+              <textarea v-model="subscriptionRename" rows="3" placeholder="正则重命名，每行 匹配 => 替换，例如：^(HK)- => 香港-$1-"></textarea>
+              <div class="override-options">
+                <label>排序<select v-model="subscriptionSort"><option value="source">订阅原序</option><option value="name">按名称</option></select></label>
+                <label class="switch-row"><input v-model="subscriptionTfo" type="checkbox" />TCP Fast Open</label>
+                <label class="switch-row"><input v-model="subscriptionUdpFragment" type="checkbox" />UDP 分片</label>
+              </div>
+            </fieldset>
           </div>
           <div v-if="subscriptionPreview" class="subscription-preview">
             <div><span>可用节点</span><strong>{{ subscriptionPreview.count }}</strong></div>
@@ -744,6 +873,7 @@ onBeforeUnmount(() => {
             <div><span>移除</span><strong>{{ subscriptionPreview.removed.length }}</strong></div>
             <p>主分类组 <strong>{{ subscriptionPreview.group }}</strong><template v-if="subscriptionPreview.skipped">，跳过 {{ subscriptionPreview.skipped }} 项</template></p>
             <p v-if="subscriptionPreview.groups.length > 1" class="muted">附加分类：{{ subscriptionPreview.groups.slice(1).map(item => `${item.label} ${item.count}`).join('、') }}</p>
+            <p class="muted">覆写：{{ subscriptionPreview.overrides.types.length ? subscriptionPreview.overrides.types.join('、') : '全部协议' }} · {{ subscriptionPreview.overrides.sort === 'name' ? '名称排序' : '原序' }} · {{ subscriptionPreview.overrides.rename.length }} 条重命名</p>
             <p class="muted node-preview">{{ subscriptionPreview.nodes.map(item => `${item.tag} · ${item.type}`).join('、') }}</p>
           </div>
           <div class="form-actions">
@@ -763,6 +893,7 @@ onBeforeUnmount(() => {
                 <strong>{{ item.label }}</strong>
                 <small>{{ item.url }}</small>
                 <span>{{ item.count }} 个节点 · {{ item.groups.map(group => `${group.label} ${group.count}`).join('、') }}<template v-if="item.skipped"> · 跳过 {{ item.skipped }}</template></span>
+                <span v-if="item.last_error" class="bad">最近刷新失败：{{ item.last_error }}</span>
               </div>
               <div class="row-actions">
                 <button @click="refreshNodeSubscription(item)">刷新</button>
@@ -808,16 +939,23 @@ onBeforeUnmount(() => {
             </div>
             <p v-if="item.members.length" class="route-chain">{{ item.members.join(' → ') }}</p>
             <p v-else class="muted endpoint">{{ item.server || '本机直出' }}<template v-if="item.server_port">:{{ item.server_port }}</template></p>
+            <div v-if="item.members.length" class="group-selection">
+              <label>组内策略</label>
+              <select :value="item.mode === 'manual' ? item.selected || '' : ''" @change="groupSelectionChange(item, $event)">
+                <option value="">自动优选</option><option v-for="member in item.members" :key="member" :value="member">固定 · {{ member }}</option>
+              </select>
+            </div>
             <div class="exit-meta">
-              <span v-if="delays[item.tag]" :class="delays[item.tag].ok ? 'good' : 'bad'">
-                {{ delays[item.tag].ok ? `${delays[item.tag].delay} ms` : '不可用' }}
+              <span v-if="delays[item.tag]" :class="delays[item.tag].ok ? 'good' : 'bad'" :title="delays[item.tag].error || ''">
+                {{ delays[item.tag].ok ? `${delays[item.tag].delay} ms` : delays[item.tag].error || '不可用' }}
               </span>
               <span>{{ item.references }} 个引用</span>
             </div>
             <div class="card-actions">
+              <button :disabled="testing" @click="testExits(item.members.length ? item.members : [item.tag])"><Gauge :size="14" />测速</button>
               <button v-if="!item.default" @click="setFinal(item.tag)">设为默认</button>
-              <button v-if="item.type === 'urltest'" @click="editGroup(item)">编辑成员</button>
-              <button v-if="item.deletable" class="danger" @click="removeExit(item)">删除</button>
+              <button v-if="item.members.length" @click="editGroup(item)">编辑成员</button>
+              <button v-if="item.deletable" class="danger" @click="removeExit(item)"><Trash2 :size="14" /></button>
             </div>
           </article>
         </section>
@@ -889,6 +1027,38 @@ onBeforeUnmount(() => {
         </section>
       </template>
 
+      <template v-if="page === 'resources'">
+        <section class="resource-grid">
+          <article class="resource-card">
+            <div class="resource-head"><Database :size="21" /><div><h2>节点订阅</h2><span>{{ subscriptions.length }} 个来源 · {{ subscriptions.reduce((sum, item) => sum + item.count, 0) }} 个节点</span></div></div>
+            <p>按来源刷新并重新应用过滤、重命名、排序和属性覆写；失败保留旧节点。</p>
+            <button class="secondary" :disabled="resourceBusy === 'subscriptions'" @click="refreshResource('subscriptions')"><RefreshCw :size="16" />全部刷新</button>
+          </article>
+          <article class="resource-card">
+            <div class="resource-head"><Route :size="21" /><div><h2>远程规则集</h2><span>{{ rulesets.length }} 个资源</span></div></div>
+            <p>下载候选、校验 sing-box 配置，成功后原子替换；失败自动回滚。</p>
+            <button class="secondary" :disabled="resourceBusy === 'rulesets'" @click="refreshResource('rulesets')"><RefreshCw :size="16" />全部刷新</button>
+          </article>
+          <article class="resource-card">
+            <div class="resource-head"><Network :size="21" /><div><h2>Geosite 数据</h2><span>{{ resources?.geosite.available ? '资源完整' : '资源缺失' }} · {{ formatTime(resources?.geosite.updated_at) }}</span></div></div>
+            <p>更新 mosdns 使用的国内、国际和 Apple 域名数据，成功后重载 DNS。</p>
+            <button class="secondary" :disabled="resourceBusy === 'geosite'" @click="refreshResource('geosite')"><RefreshCw :size="16" />在线更新</button>
+          </article>
+          <article class="resource-card" :class="{ attention: resources?.project.update_available }">
+            <div class="resource-head"><Server :size="21" /><div><h2>PrivDNS Gateway</h2><span>{{ resources?.project.current || '未知版本' }}<template v-if="resources?.project.latest"> · 最新 {{ resources.project.latest }}</template></span></div></div>
+            <p>从项目发布仓库检查更新，后台执行现有 pdg update 快照、校验和回滚流程。</p>
+            <div class="row-actions start"><button @click="checkProjectUpdate"><Search :size="16" />检查</button><button v-if="resources?.project.update_available" class="primary compact" @click="startProjectUpdate">立即更新</button></div>
+          </article>
+        </section>
+        <section class="panel">
+          <div class="section-title"><div><p class="eyebrow">RESOURCE STATUS</p><h2>最近状态</h2></div><button class="secondary" @click="loadResources"><RefreshCw :size="16" />刷新状态</button></div>
+          <div class="resource-list">
+            <div v-for="item in subscriptions" :key="item.id"><span class="kind">订阅</span><strong>{{ item.label }}</strong><small>{{ formatTime(item.updated_at) }}</small><em :class="item.last_error ? 'bad' : 'good'">{{ item.last_error || '正常' }}</em></div>
+            <div v-for="item in rulesets" :key="item.tag"><span class="kind">规则集</span><strong>{{ item.label }}</strong><small>{{ formatTime(item.updated_at) }}</small><em :class="item.last_error ? 'bad' : 'good'">{{ item.last_error || (item.available ? '正常' : '文件缺失') }}</em></div>
+          </div>
+        </section>
+      </template>
+
       <template v-if="page === 'runtime'">
         <div class="section-actions runtime-actions">
           <button class="secondary" @click="loadRuntime">刷新连接</button>
@@ -925,7 +1095,6 @@ onBeforeUnmount(() => {
         </section>
         <section class="system-actions">
           <button class="secondary" @click="loadAll">刷新全部状态</button>
-          <button class="secondary" @click="openZashboard">实时节点面板</button>
           <button class="danger-button" @click="logout">退出并清除本机令牌</button>
         </section>
       </template>
@@ -933,7 +1102,7 @@ onBeforeUnmount(() => {
 
     <nav class="mobile-nav">
       <button v-for="item in navItems" :key="item.id" :class="{ active: page === item.id }" @click="selectPage(item.id)">
-        <span>{{ item.icon }}</span>{{ item.label }}
+        <component :is="item.icon" :size="19" />{{ item.label }}
       </button>
     </nav>
   </div>

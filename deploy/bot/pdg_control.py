@@ -31,6 +31,7 @@ PROXY_TYPES = (
     "tuic", "anytls", "shadowtls", "socks", "http",
 )
 SYSTEM_OUTBOUND_TAGS = {"gms-mtalk"}
+GROUP_TYPES = ("urltest", "selector")
 
 
 def proxy_outbounds(config: dict) -> list[dict]:
@@ -40,7 +41,7 @@ def proxy_outbounds(config: dict) -> list[dict]:
 def exit_tags(config: dict) -> list[str]:
     return [
         item["tag"] for item in config.get("outbounds", [])
-        if item.get("type") in PROXY_TYPES + ("direct", "urltest")
+        if item.get("type") in PROXY_TYPES + ("direct",) + GROUP_TYPES
         and item.get("tag") not in SYSTEM_OUTBOUND_TAGS
     ]
 
@@ -56,7 +57,7 @@ def concrete_tags(config: dict) -> list[str]:
 def deletable_tags(config: dict) -> list[str]:
     return [
         item["tag"] for item in config.get("outbounds", [])
-        if item.get("type") in PROXY_TYPES + ("urltest",)
+        if item.get("type") in PROXY_TYPES + GROUP_TYPES
     ]
 
 
@@ -64,7 +65,7 @@ def outbound_impact(config: dict, tag: str) -> dict:
     """返回删除出口前需要展示的引用影响。"""
     groups = [
         item["tag"] for item in config.get("outbounds", [])
-        if item.get("type") == "urltest" and tag in item.get("outbounds", [])
+        if item.get("type") in GROUP_TYPES and tag in item.get("outbounds", [])
     ]
     rules = []
     telegram = False
@@ -95,8 +96,10 @@ def delete_outbound(config: dict, tag: str) -> str:
     config["outbounds"] = [item for item in config["outbounds"] if item.get("tag") != tag]
     removed_groups = set()
     for item in config["outbounds"]:
-        if item.get("type") == "urltest":
+        if item.get("type") in GROUP_TYPES:
             item["outbounds"] = [member for member in item.get("outbounds", []) if member != tag]
+            if item.get("type") == "selector" and item.get("default") == tag:
+                item["default"] = item["outbounds"][0] if item["outbounds"] else ""
             if not item["outbounds"]:
                 removed_groups.add(item["tag"])
     if removed_groups:

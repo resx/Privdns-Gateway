@@ -84,7 +84,15 @@ with tempfile.TemporaryDirectory() as directory:
     assert service.overview()["default_exit"] == "new"
 
     group = service.save_group("fallback", ["hk", "new"])
-    assert group == {"tag": "fallback", "members": ["hk", "new"]}
+    assert group == {"tag": "fallback", "members": ["hk", "new"], "mode": "auto", "selected": None}
+    assert service.set_group_selection("fallback", "new") == {
+        "tag": "fallback", "mode": "manual", "selected": "new",
+    }
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    fixed_group = next(item for item in current["outbounds"] if item.get("tag") == "fallback")
+    assert fixed_group["type"] == "selector" and fixed_group["default"] == "new"
+    service.save_group("fallback", ["hk", "new"])
+    assert service.set_group_selection("fallback", None)["mode"] == "auto"
     try:
         service.save_group("bad", ["hk"])
         raise AssertionError("single-member group should fail")
@@ -113,20 +121,45 @@ with tempfile.TemporaryDirectory() as directory:
     assert config_path.read_bytes() == unchanged
     subscription_url = "https://subscribe.example/nodes?token=top-secret"
     categories = [{"name": "香港", "pattern": "HK|香港"}, {"name": "台湾", "pattern": "TW|台湾"}]
-    sub_preview = service.preview_subscription(subscription_url, "机场 A", categories=categories)
+    overrides = {
+        "types": ["socks"], "rename": [{"pattern": "^(HK|TW)-", "replacement": "Region-$1-"}],
+        "sort": "name", "properties": {"tcp_fast_open": True, "udp_fragment": True},
+    }
+    sub_preview = service.preview_subscription(
+        subscription_url, "机场 A", categories=categories, overrides=overrides,
+    )
     assert sub_preview["count"] == 2 and sub_preview["skipped"] == 1
     assert [group["count"] for group in sub_preview["groups"]] == [2, 1, 1]
     assert "top-secret" not in json.dumps(sub_preview, ensure_ascii=False)
-    saved_sub = service.save_subscription(subscription_url, "机场 A", categories=categories)
+    assert sub_preview["overrides"] == overrides
+    saved_sub = service.save_subscription(
+        subscription_url, "机场 A", categories=categories, overrides=overrides,
+    )
     assert saved_sub["count"] == 2 and saved_sub["has_secret"]
     assert "top-secret" not in json.dumps(service.list_subscriptions(), ensure_ascii=False)
     sub_meta = json.loads(subscription_path.read_text(encoding="utf-8"))[saved_sub["id"]]
+    assert sub_meta["overrides"] == overrides
     old_nodes = sub_meta["nodes"]
     current = json.loads(config_path.read_text(encoding="utf-8"))
     assert len(sub_meta["groups"]) == 3
     assert all(any(item.get("tag") == group["tag"] for item in current["outbounds"]) for group in sub_meta["groups"])
+    owned_nodes = [item for item in current["outbounds"] if item.get("tag") in old_nodes]
+    assert all(item.get("tcp_fast_open") is True and item.get("udp_fragment") is True for item in owned_nodes)
+    anytls = {"type": "anytls", "tag": "AnyTLS", "server": "node.example", "server_port": 443}
+    service._fetch_subscription = lambda url: base64.urlsafe_b64encode(
+        b"anytls://password@node.example:443#AnyTLS"
+    ).rstrip(b"=")
+    anytls_preview = service.preview_subscription(
+        "https://subscribe.example/anytls", overrides={"properties": {"tcp_fast_open": True}},
+    )
+    assert anytls_preview["count"] == 1
+    prepared_anytls = service._prepare_subscription(
+        "https://subscribe.example/anytls", overrides={"properties": {"tcp_fast_open": True}},
+    )["outbounds"][0]
+    assert prepared_anytls["type"] == anytls["type"] and "tcp_fast_open" not in prepared_anytls
     current["route"]["rules"].append({"domain_suffix": ["owned.example"], "outbound": old_nodes[-1]})
     config_path.write_text(json.dumps(current), encoding="utf-8")
+    service.set_group_selection(sub_meta["group"], old_nodes[0])
 
     service._fetch_subscription = lambda url: base64.urlsafe_b64encode(
         b"socks5://user:newpass@sub-hk.example.com:1080#HK-01"
@@ -134,6 +167,8 @@ with tempfile.TemporaryDirectory() as directory:
     refreshed_sub = service.refresh_subscription(saved_sub["id"])
     assert refreshed_sub["count"] == 1
     current = json.loads(config_path.read_text(encoding="utf-8"))
+    selected_group = next(item for item in current["outbounds"] if item.get("tag") == sub_meta["group"])
+    assert selected_group["type"] == "selector" and selected_group["default"] == old_nodes[0]
     assert all(rule.get("outbound") != old_nodes[-1] for rule in current["route"]["rules"])
     assert any(rule.get("outbound") == sub_meta["group"] for rule in current["route"]["rules"])
     service.set_final(sub_meta["group"])

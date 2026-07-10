@@ -10,6 +10,8 @@ import re
 import socket
 import tempfile
 import threading
+import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -17,6 +19,7 @@ from pathlib import Path
 
 from pdg_control import (
     SingBoxControl,
+    GROUP_TYPES,
     PROXY_TYPES,
     concrete_tags,
     deletable_tags,
@@ -26,6 +29,15 @@ from pdg_control import (
     proxy_outbounds,
 )
 from pdg_links import normalize_tag, parse_link, parse_subscription
+
+
+URLTEST_URL = "https://www.gstatic.com/generate_204"
+TEST_TARGETS = {
+    "google": URLTEST_URL,
+    "cloudflare": "https://cp.cloudflare.com/generate_204",
+    "apple": "https://www.apple.com/library/test/success.html",
+}
+OVERRIDE_PROPERTIES = {"tcp_fast_open", "udp_fragment"}
 
 
 class ServiceError(Exception):
@@ -79,7 +91,7 @@ class GatewayService:
             result = self._run(["systemctl", "is-active", name])
             services[name] = result.stdout.strip() or "unknown"
         proxy_count = len(proxy_outbounds(config))
-        groups = sum(1 for item in config.get("outbounds", []) if item.get("type") == "urltest")
+        groups = sum(1 for item in config.get("outbounds", []) if item.get("type") in GROUP_TYPES)
         rules = len(self.list_rules())
         return {
             "services": services,
@@ -104,7 +116,9 @@ class GatewayService:
                 "server": self._mask_host(item.get("server")) if item.get("server") else None,
                 "server_port": item.get("server_port"),
                 "tls": bool(item.get("tls", {}).get("enabled")),
-                "members": item.get("outbounds", []) if item.get("type") == "urltest" else [],
+                "members": item.get("outbounds", []) if item.get("type") in GROUP_TYPES else [],
+                "mode": "manual" if item.get("type") == "selector" else ("auto" if item.get("type") == "urltest" else None),
+                "selected": item.get("default") if item.get("type") == "selector" else None,
                 "default": tag == final,
                 "deletable": tag in deletable_tags(config),
                 "references": len(impact["groups"]) + len(impact["rules"])
@@ -233,6 +247,46 @@ class GatewayService:
         except re.error as error:
             raise ServiceError(f"{label}正则无效: {error}") from error
 
+    def _normalize_subscription_overrides(self, overrides: dict | None) -> dict:
+        if overrides in (None, {}):
+            return {"types": [], "rename": [], "sort": "source", "properties": {}}
+        if not isinstance(overrides, dict):
+            raise ServiceError("订阅覆写必须是对象")
+        raw_types = overrides.get("types", [])
+        if not isinstance(raw_types, list):
+            raise ServiceError("协议过滤必须是数组")
+        types = list(dict.fromkeys(str(value).strip() for value in raw_types if str(value).strip()))
+        unknown = [value for value in types if value not in PROXY_TYPES]
+        if unknown:
+            raise ServiceError("不支持的协议过滤: " + ", ".join(unknown))
+        raw_rename = overrides.get("rename", [])
+        if not isinstance(raw_rename, list) or len(raw_rename) > 12:
+            raise ServiceError("重命名覆写必须是数组且最多 12 项")
+        rename = []
+        for item in raw_rename:
+            if not isinstance(item, dict):
+                raise ServiceError("重命名覆写格式错误")
+            pattern = str(item.get("pattern", "")).strip()
+            replacement = str(item.get("replacement", ""))
+            if not pattern:
+                raise ServiceError("重命名正则不能为空")
+            self._subscription_regex(pattern, "重命名")
+            if len(replacement) > 100:
+                raise ServiceError("重命名替换文本过长")
+            rename.append({"pattern": pattern, "replacement": replacement})
+        sort = str(overrides.get("sort", "source"))
+        if sort not in {"source", "name"}:
+            raise ServiceError("节点排序仅支持 source 或 name")
+        raw_properties = overrides.get("properties", {})
+        if not isinstance(raw_properties, dict):
+            raise ServiceError("节点属性覆写必须是对象")
+        properties = {}
+        for name, value in raw_properties.items():
+            if name not in OVERRIDE_PROPERTIES or not isinstance(value, bool):
+                raise ServiceError(f"节点属性覆写无效: {name}")
+            properties[name] = value
+        return {"types": types, "rename": rename, "sort": sort, "properties": properties}
+
     def _fetch_subscription(self, url: str) -> bytes:
         self._require_public_subscription_host(url)
         request = urllib.request.Request(url, headers={"User-Agent": "privdns-gateway-subscription"})
@@ -315,6 +369,18 @@ class GatewayService:
             })
         return groups
 
+    @staticmethod
+    def _group_outbound(tag: str, members: list[str], existing: dict | None = None) -> dict:
+        if existing and existing.get("type") == "selector" and existing.get("default") in members:
+            return {
+                "type": "selector", "tag": tag, "outbounds": members,
+                "default": existing["default"], "interrupt_exist_connections": True,
+            }
+        return {
+            "type": "urltest", "tag": tag, "outbounds": members,
+            "url": URLTEST_URL, "interval": "3m", "tolerance": 50,
+        }
+
     def _prepare_subscription(
         self,
         url: str,
@@ -324,11 +390,13 @@ class GatewayService:
         group: str = "",
         identifier: str | None = None,
         categories: list[dict] | None = None,
+        overrides: dict | None = None,
     ) -> dict:
         url = self._subscription_url(url)
         identifier = identifier or self._subscription_id(url)
         include_re = self._subscription_regex(include, "包含")
         exclude_re = self._subscription_regex(exclude, "排除")
+        normalized_overrides = self._normalize_subscription_overrides(overrides)
         try:
             parsed, errors = parse_subscription(self._fetch_subscription(url))
         except ValueError as error:
@@ -338,24 +406,38 @@ class GatewayService:
 
         selected = []
         for outbound in parsed:
-            name = str(outbound.get("tag", ""))
-            if include_re and not include_re.search(name):
+            original_name = str(outbound.get("tag", ""))
+            if normalized_overrides["types"] and outbound.get("type") not in normalized_overrides["types"]:
                 continue
-            if exclude_re and exclude_re.search(name):
+            if include_re and not include_re.search(original_name):
                 continue
+            if exclude_re and exclude_re.search(original_name):
+                continue
+            name = original_name
+            for rule in normalized_overrides["rename"]:
+                replacement = re.sub(r"\$(\d+)", r"\\g<\1>", rule["replacement"])
+                name = re.sub(rule["pattern"], replacement, name, flags=re.I)
+            name = name.strip() or original_name
             selected.append((outbound, name))
+        if normalized_overrides["sort"] == "name":
+            selected.sort(key=lambda item: item[1].casefold())
         if not selected:
             raise ServiceError("订阅过滤后没有可用节点，未修改现有配置")
 
         used, outbounds, named_tags = {}, [], []
-        for outbound, original_name in selected:
+        for outbound, display_name in selected:
             value = json.loads(json.dumps(outbound))
+            value["tag"] = display_name
+            for property_name, enabled in normalized_overrides["properties"].items():
+                if property_name == "tcp_fast_open" and enabled and value.get("type") == "anytls":
+                    continue
+                value[property_name] = enabled
             tag = self._subscription_tag(identifier, value, used)
             if any(item.get("tag") == tag for item in outbounds):
                 continue
             value["tag"] = tag
             outbounds.append(value)
-            named_tags.append((original_name, tag))
+            named_tags.append((display_name, tag))
         if not outbounds:
             raise ServiceError("订阅没有可应用的唯一节点")
 
@@ -386,6 +468,7 @@ class GatewayService:
             "added": added, "updated": updated, "removed": removed,
             "groups": self._subscription_groups(identifier, group_tag, outbounds, named_tags, categories),
             "category_input": self._normalize_categories(categories),
+            "override_input": normalized_overrides,
         }
 
     @staticmethod
@@ -398,8 +481,9 @@ class GatewayService:
             "url": masked, "has_secret": bool(parsed.query or parsed.username or parsed.password or parsed.fragment),
             "include": info.get("include", ""), "exclude": info.get("exclude", ""),
             "group": info.get("group"), "groups": info.get("groups", []),
-            "categories": info.get("categories", []), "count": int(info.get("count", 0)),
-            "skipped": int(info.get("skipped", 0)), "updated_at": info.get("updated_at"),
+            "categories": info.get("categories", []), "overrides": info.get("overrides", {}),
+            "count": int(info.get("count", 0)), "skipped": int(info.get("skipped", 0)),
+            "updated_at": info.get("updated_at"), "last_error": info.get("last_error"),
         }
 
     def list_subscriptions(self) -> list[dict]:
@@ -411,22 +495,32 @@ class GatewayService:
     def preview_subscription(
         self, url: str, label: str = "", include: str = "", exclude: str = "",
         group: str = "", identifier: str | None = None, categories: list[dict] | None = None,
+        overrides: dict | None = None,
     ) -> dict:
-        prepared = self._prepare_subscription(url, label, include, exclude, group, identifier, categories)
-        result = {key: value for key, value in prepared.items() if key not in {"url", "outbounds", "category_input"}}
+        prepared = self._prepare_subscription(
+            url, label, include, exclude, group, identifier, categories, overrides,
+        )
+        result = {
+            key: value for key, value in prepared.items()
+            if key not in {"url", "outbounds", "category_input", "override_input"}
+        }
         result["categories"] = prepared["category_input"]
+        result["overrides"] = prepared["override_input"]
         return result
 
     def save_subscription(
         self, url: str, label: str = "", include: str = "", exclude: str = "",
         group: str = "", identifier: str | None = None, categories: list[dict] | None = None,
+        overrides: dict | None = None,
     ) -> dict:
         with self._metadata_lock:
             meta = self._subscription_meta()
             if identifier and identifier not in meta:
                 raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
             previous = meta.get(identifier or self._subscription_id(url), {})
-            prepared = self._prepare_subscription(url, label, include, exclude, group, identifier, categories)
+            prepared = self._prepare_subscription(
+                url, label, include, exclude, group, identifier, categories, overrides,
+            )
             identifier = prepared["id"]
             old_nodes = set(previous.get("nodes", []))
             old_groups = {item.get("tag") for item in previous.get("groups", []) if item.get("tag")}
@@ -438,6 +532,10 @@ class GatewayService:
             new_groups = {item["tag"] for item in group_specs}
             old_owned = old_nodes | old_groups
             new_owned = new_nodes | new_groups
+            existing_groups = {
+                item.get("tag"): item for item in self.control.load().get("outbounds", [])
+                if item.get("tag") in old_groups and item.get("type") in GROUP_TYPES
+            }
 
             def modify(config):
                 occupied = {
@@ -451,10 +549,10 @@ class GatewayService:
                     item for item in config.get("outbounds", []) if item.get("tag") not in old_owned
                 ]
                 config["outbounds"].extend(prepared["outbounds"])
-                config["outbounds"].extend({
-                    "type": "urltest", "tag": spec["tag"], "outbounds": spec["members"],
-                    "url": "http://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50,
-                } for spec in group_specs)
+                config["outbounds"].extend(
+                    self._group_outbound(spec["tag"], spec["members"], existing_groups.get(spec["tag"]))
+                    for spec in group_specs
+                )
                 removed = old_owned - new_owned
                 route = config.setdefault("route", {})
                 if route.get("final") in removed:
@@ -466,10 +564,12 @@ class GatewayService:
                 for outbound in config["outbounds"]:
                     if outbound.get("detour") in removed:
                         outbound["detour"] = new_group
-                    if outbound.get("type") == "urltest" and outbound.get("tag") != new_group:
+                    if outbound.get("type") in GROUP_TYPES and outbound.get("tag") != new_group:
                         outbound["outbounds"] = [
                             member for member in outbound.get("outbounds", []) if member not in removed
                         ]
+                        if outbound.get("type") == "selector" and outbound.get("default") in removed:
+                            outbound["default"] = outbound["outbounds"][0] if outbound["outbounds"] else ""
                         if not outbound["outbounds"]:
                             empty_groups.add(outbound.get("tag"))
                 if empty_groups:
@@ -480,10 +580,12 @@ class GatewayService:
                     for outbound in config["outbounds"]:
                         if outbound.get("detour") in broken:
                             outbound["detour"] = new_group
-                        if outbound.get("type") == "urltest" and outbound.get("tag") != new_group:
+                        if outbound.get("type") in GROUP_TYPES and outbound.get("tag") != new_group:
                             outbound["outbounds"] = [
                                 member for member in outbound.get("outbounds", []) if member not in broken
                             ]
+                            if outbound.get("type") == "selector" and outbound.get("default") in broken:
+                                outbound["default"] = outbound["outbounds"][0] if outbound["outbounds"] else ""
                     for rule in route["rules"]:
                         if rule.get("outbound") in empty_groups:
                             rule["outbound"] = new_group
@@ -498,9 +600,9 @@ class GatewayService:
                 "include": prepared["include"], "exclude": prepared["exclude"],
                 "group": new_group,
                 "groups": [{"tag": item["tag"], "label": item["label"], "count": item["count"]} for item in group_specs],
-                "categories": prepared["category_input"], "nodes": sorted(new_nodes),
-                "count": prepared["count"], "skipped": prepared["skipped"],
-                "created_at": previous.get("created_at") or now, "updated_at": now,
+                "categories": prepared["category_input"], "overrides": prepared["override_input"],
+                "nodes": sorted(new_nodes), "count": prepared["count"], "skipped": prepared["skipped"],
+                "created_at": previous.get("created_at") or now, "updated_at": now, "last_error": None,
             }
             self._save_subscription_meta(meta)
         return self._public_subscription(identifier, meta[identifier])
@@ -517,9 +619,14 @@ class GatewayService:
             str(changes["group"]) if "group" in changes else str(info.get("group", "")),
             identifier,
             changes["categories"] if "categories" in changes else info.get("categories", []),
+            changes["overrides"] if "overrides" in changes else info.get("overrides", {}),
         )
-        result = {key: value for key, value in prepared.items() if key not in {"url", "outbounds", "category_input"}}
+        result = {
+            key: value for key, value in prepared.items()
+            if key not in {"url", "outbounds", "category_input", "override_input"}
+        }
         result["categories"] = prepared["category_input"]
+        result["overrides"] = prepared["override_input"]
         return result
 
     def update_subscription(self, identifier: str, **changes) -> dict:
@@ -534,6 +641,7 @@ class GatewayService:
             str(changes["group"]) if "group" in changes else str(info.get("group", "")),
             identifier,
             changes["categories"] if "categories" in changes else info.get("categories", []),
+            changes["overrides"] if "overrides" in changes else info.get("overrides", {}),
         )
 
     def refresh_subscription(self, identifier: str) -> dict:
@@ -554,15 +662,19 @@ class GatewayService:
                 remaining = [item for item in config.get("outbounds", []) if item.get("tag") not in owned]
                 empty_groups = set()
                 for outbound in remaining:
-                    if outbound.get("type") == "urltest":
+                    if outbound.get("type") in GROUP_TYPES:
                         outbound["outbounds"] = [member for member in outbound.get("outbounds", []) if member not in owned]
+                        if outbound.get("type") == "selector" and outbound.get("default") in owned:
+                            outbound["default"] = outbound["outbounds"][0] if outbound["outbounds"] else ""
                         if not outbound["outbounds"]:
                             empty_groups.add(outbound.get("tag"))
                 remaining = [item for item in remaining if item.get("tag") not in empty_groups]
                 broken = owned | empty_groups
                 for outbound in remaining:
-                    if outbound.get("type") == "urltest":
+                    if outbound.get("type") in GROUP_TYPES:
                         outbound["outbounds"] = [member for member in outbound.get("outbounds", []) if member not in broken]
+                        if outbound.get("type") == "selector" and outbound.get("default") in broken:
+                            outbound["default"] = outbound["outbounds"][0] if outbound["outbounds"] else ""
                 live = exit_tags({"outbounds": remaining})
                 if not live:
                     raise ValueError("删除订阅后没有可用出口")
@@ -591,7 +703,13 @@ class GatewayService:
                 value = self.refresh_subscription(identifier)
                 results.append({"id": identifier, "ok": True, "count": value["count"]})
             except Exception as error:  # 定时任务逐个隔离，保留该订阅旧配置
-                results.append({"id": identifier, "ok": False, "error": str(error)[:120]})
+                message = str(error)[:120]
+                with self._metadata_lock:
+                    meta = self._subscription_meta()
+                    if identifier in meta:
+                        meta[identifier]["last_error"] = message
+                        self._save_subscription_meta(meta)
+                results.append({"id": identifier, "ok": False, "error": message})
         return results
 
     def exit_impact(self, tag: str) -> dict:
@@ -636,27 +754,45 @@ class GatewayService:
             raise ServiceError("故障组至少需要两个具体出口")
 
         def modify(value):
-            for outbound in value["outbounds"]:
-                if outbound.get("tag") == name:
-                    if outbound.get("type") != "urltest":
-                        raise ValueError(f"名称 {name} 已被占用")
-                    outbound["outbounds"] = members
-                    outbound.setdefault("url", "http://www.gstatic.com/generate_204")
-                    outbound.setdefault("interval", "3m")
-                    outbound.setdefault("tolerance", 50)
-                    return
-            value["outbounds"].append({
-                "type": "urltest", "tag": name, "outbounds": members,
-                "url": "http://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50,
-            })
+            for index, outbound in enumerate(value["outbounds"]):
+                if outbound.get("tag") != name:
+                    continue
+                if outbound.get("type") not in GROUP_TYPES:
+                    raise ValueError(f"名称 {name} 已被占用")
+                value["outbounds"][index] = self._group_outbound(name, members, outbound)
+                return
+            value["outbounds"].append(self._group_outbound(name, members))
 
         self._check_result(self.control.apply(modify))
-        return {"tag": name, "members": members}
+        current = next(item for item in self.list_exits() if item["tag"] == name)
+        return {"tag": name, "members": members, "mode": current["mode"], "selected": current["selected"]}
+
+    def set_group_selection(self, tag: str, selected: str | None) -> dict:
+        config = self.control.load()
+        group = next((item for item in config.get("outbounds", []) if item.get("tag") == tag), None)
+        if not group or group.get("type") not in GROUP_TYPES:
+            raise ServiceError(f"节点组 {tag} 不存在", 404)
+        members = list(group.get("outbounds", []))
+        selected = str(selected or "").strip()
+        if selected and selected not in members:
+            raise ServiceError(f"节点 {selected} 不属于组 {tag}")
+
+        def modify(value):
+            for index, outbound in enumerate(value.get("outbounds", [])):
+                if outbound.get("tag") != tag:
+                    continue
+                existing = {"type": "selector", "default": selected} if selected else None
+                value["outbounds"][index] = self._group_outbound(tag, members, existing)
+                return
+            raise ValueError(f"节点组 {tag} 不存在")
+
+        self._check_result(self.control.apply(modify))
+        return {"tag": tag, "mode": "manual" if selected else "auto", "selected": selected or None}
 
     def remove_group(self, tag: str) -> dict:
         config = self.control.load()
         group = next((item for item in config.get("outbounds", []) if item.get("tag") == tag), None)
-        if not group or group.get("type") != "urltest":
+        if not group or group.get("type") not in GROUP_TYPES:
             raise ServiceError(f"故障组 {tag} 不存在", 404)
         return self.remove_exit(tag)
 
@@ -828,6 +964,7 @@ class GatewayService:
                 "tag": tag, "label": info.get("label") or tag, "url": info.get("url", ""),
                 "target": targets.get(tag) or info.get("outbound"), "format": info.get("format", "source"),
                 "count": info.get("count"), "available": Path(path).is_file(),
+                "updated_at": info.get("updated_at"), "last_error": info.get("last_error"),
             })
         return output
 
@@ -864,6 +1001,7 @@ class GatewayService:
             meta = self._ruleset_meta()
             meta[tag] = {
                 "url": url, "outbound": target, "format": fmt, "path": path, "count": count,
+                "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "last_error": None,
             }
             clean_label = label.strip()[:40]
             if clean_label:
@@ -905,7 +1043,25 @@ class GatewayService:
         info = self._ruleset_meta().get(tag)
         if not info:
             raise ServiceError(f"规则集 {tag} 不存在", 404)
-        return self.save_ruleset(info["url"], info.get("outbound") or "", info.get("label") or "")
+        try:
+            return self.save_ruleset(info["url"], info.get("outbound") or "", info.get("label") or "")
+        except Exception as error:
+            with self._metadata_lock:
+                meta = self._ruleset_meta()
+                if tag in meta:
+                    meta[tag]["last_error"] = str(error)[:120]
+                    self._save_ruleset_meta(meta)
+            raise
+
+    def refresh_rulesets(self) -> list[dict]:
+        results = []
+        for tag in list(self._ruleset_meta()):
+            try:
+                value = self.refresh_ruleset(tag)
+                results.append({"tag": tag, "ok": True, "count": value.get("count")})
+            except Exception as error:
+                results.append({"tag": tag, "ok": False, "error": str(error)[:120]})
+        return results
 
     def remove_ruleset(self, tag: str) -> dict:
         with self._metadata_lock:
@@ -1059,6 +1215,73 @@ class GatewayService:
             "kind": "final", "match": "默认出口",
         }
 
+    def _project_status(self, check_remote: bool = False) -> dict:
+        repo = "/opt/privdns-gateway"
+        if check_remote:
+            fetched = self._run(["git", "-C", repo, "fetch", "-q", "--tags", "origin", "main"])
+            if fetched.returncode != 0:
+                raise ServiceError("检查项目更新失败: " + ((fetched.stderr or fetched.stdout).strip()[-160:]), 502)
+        current_result = self._run(["git", "-C", repo, "describe", "--tags", "--always"])
+        tags_result = self._run(["git", "-C", repo, "tag", "-l", "v*", "--sort=-v:refname"])
+        if current_result.returncode != 0:
+            return {"current": "unknown", "latest": None, "update_available": False}
+        current = current_result.stdout.strip() or "unknown"
+        latest = next(iter(tags_result.stdout.splitlines()), None) if tags_result.returncode == 0 else None
+        update_available = False
+        if latest:
+            head = self._run(["git", "-C", repo, "rev-parse", "HEAD"])
+            target = self._run(["git", "-C", repo, "rev-parse", latest + "^{commit}"])
+            ancestor = self._run(["git", "-C", repo, "merge-base", "--is-ancestor", "HEAD", latest])
+            update_available = head.returncode == 0 and target.returncode == 0 \
+                and head.stdout.strip() != target.stdout.strip() and ancestor.returncode == 0
+        return {"current": current, "latest": latest, "update_available": update_available}
+
+    @staticmethod
+    def _file_updated_at(paths: list[Path]) -> str | None:
+        mtimes = [path.stat().st_mtime for path in paths if path.is_file()]
+        if not mtimes:
+            return None
+        return datetime.fromtimestamp(max(mtimes), timezone.utc).isoformat(timespec="seconds")
+
+    def resource_status(self) -> dict:
+        geosite_paths = [
+            Path("/etc/mosdns/rules/geosite_cn.txt"),
+            Path("/etc/mosdns/rules/geosite_geolocation-!cn.txt"),
+            Path("/etc/mosdns/rules/geosite_apple.txt"),
+        ]
+        return {
+            "subscriptions": self.list_subscriptions(),
+            "rulesets": self.list_rulesets(),
+            "geosite": {
+                "available": all(path.is_file() for path in geosite_paths),
+                "updated_at": self._file_updated_at(geosite_paths),
+                "files": sum(path.is_file() for path in geosite_paths),
+            },
+            "project": self._project_status(),
+        }
+
+    def refresh_geosite(self) -> dict:
+        result = self._run(["/bin/bash", "/opt/pdg-bot/update-rules.sh"])
+        if result.returncode != 0:
+            raise ServiceError("Geosite 更新失败: " + ((result.stderr or result.stdout).strip()[-200:]), 502)
+        return {"ok": True, "updated_at": self._file_updated_at([
+            Path("/etc/mosdns/rules/geosite_cn.txt"),
+            Path("/etc/mosdns/rules/geosite_geolocation-!cn.txt"),
+            Path("/etc/mosdns/rules/geosite_apple.txt"),
+        ])}
+
+    def check_project_update(self) -> dict:
+        return self._project_status(check_remote=True)
+
+    def start_project_update(self) -> dict:
+        unit = "pdg-web-update-" + str(int(time.time()))
+        result = self._run([
+            "systemd-run", "--collect", "--unit", unit, "/usr/local/bin/pdg", "update",
+        ])
+        if result.returncode != 0:
+            raise ServiceError("项目更新任务启动失败: " + ((result.stderr or result.stdout).strip()[-160:]), 502)
+        return {"accepted": True, "unit": unit}
+
     def _clash_request(self, path: str, method: str = "GET") -> dict:
         request = urllib.request.Request(self.clash_url + path, method=method)
         with urllib.request.urlopen(request, timeout=12) as response:
@@ -1097,15 +1320,44 @@ class GatewayService:
             raise ServiceError("读取服务日志失败", 500)
         return {"lines": result.stdout.splitlines()[-limit:]}
 
-    def test_exits(self) -> list[dict]:
+    def test_exits(self, tags: list[str] | None = None, target: str = "google") -> list[dict]:
+        if target not in TEST_TARGETS:
+            raise ServiceError("未知测速目标")
+        available = concrete_tags(self.control.load())
+        if tags is None:
+            selected = available
+        elif not isinstance(tags, list):
+            raise ServiceError("测速节点必须是数组")
+        else:
+            selected = list(dict.fromkeys(str(tag) for tag in tags))
+            unknown = [tag for tag in selected if tag not in available]
+            if unknown:
+                raise ServiceError("未知测速节点: " + ", ".join(unknown), 404)
         results = []
-        for tag in concrete_tags(self.control.load()):
-            query = urllib.parse.urlencode({"timeout": 5000, "url": "http://www.gstatic.com/generate_204"})
+        for tag in selected:
+            query = urllib.parse.urlencode({"timeout": 8000, "url": TEST_TARGETS[target]})
             url = f"{self.clash_url}/proxies/{urllib.parse.quote(tag, safe='')}/delay?{query}"
+            started = time.monotonic()
             try:
-                with urllib.request.urlopen(url, timeout=8) as response:
-                    delay = json.load(response).get("delay")
-                results.append({"tag": tag, "ok": True, "delay": delay})
-            except Exception:
-                results.append({"tag": tag, "ok": False, "delay": None})
+                with urllib.request.urlopen(url, timeout=11) as response:
+                    delay = int(json.load(response).get("delay") or 0)
+                if delay <= 0:
+                    raise ValueError("测速未返回有效延迟")
+                results.append({"tag": tag, "ok": True, "delay": delay, "target": target, "error": None})
+            except urllib.error.HTTPError as error:
+                results.append({
+                    "tag": tag, "ok": False, "delay": None, "target": target,
+                    "error": f"核心返回 HTTP {error.code}", "elapsed": int((time.monotonic() - started) * 1000),
+                })
+            except urllib.error.URLError as error:
+                reason = "连接超时" if isinstance(error.reason, TimeoutError) else "目标不可达"
+                results.append({
+                    "tag": tag, "ok": False, "delay": None, "target": target,
+                    "error": reason, "elapsed": int((time.monotonic() - started) * 1000),
+                })
+            except Exception as error:
+                results.append({
+                    "tag": tag, "ok": False, "delay": None, "target": target,
+                    "error": str(error)[:80] or "测速失败", "elapsed": int((time.monotonic() - started) * 1000),
+                })
         return results

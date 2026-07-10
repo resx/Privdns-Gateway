@@ -52,21 +52,23 @@ grep -q 'NoNewPrivileges=true' "$ROOT/deploy/admin/pdg-admin.service" \
 grep -q 'admin \[--rotate\]' "$ROOT/deploy/bot/pdg.sh" \
   && grep -q '旧链接立即失效' "$ROOT/deploy/bot/pdg.sh" \
   && ok "CLI 支持管理令牌轮换" || bad "CLI 缺令牌轮换"
-for endpoint in groups rulesets route/test connections logs; do
+for endpoint in groups rulesets route/test resources connections logs; do
   grep -q "/api/v1/$endpoint" "$ROOT/web/src/App.vue" || bad "PWA 缺 $endpoint API"
 done
 if grep -q '/api/v1/rulesets' "$ROOT/web/src/App.vue" && grep -q '/api/v1/connections' "$ROOT/web/src/App.vue"; then
   ok "PWA 已接入规则集和连接页面"
 fi
-grep -q 'panel/zashboard' "$ROOT/install.sh" \
-  && grep -q 'panel/zashboard' "$ROOT/deploy/bot/pdg.sh" \
-  && grep -q '! -s /opt/pdg-admin/zashboard/index.html' "$ROOT/deploy/bot/pdg.sh" \
-  && grep -q 'check_zashboard_assets' "$ROOT/deploy/bot/checks.py" \
-  && grep -q '/zashboard/api' "$ROOT/deploy/admin/pdg-admin.py" \
-  && grep -q '127.0.0.1:9090' "$ROOT/deploy/singbox/config.json.tmpl" \
-  && ok "Zashboard 经 9443 受限代理部署且资源受检,Clash API 保持本机" || bad "Zashboard 部署、自检或安全边界缺失"
-[[ -f "$ROOT/panel/zashboard/LICENSE" && -f "$ROOT/panel/zashboard/UPSTREAM.md" ]] \
-  && ok "Zashboard 上游版本与许可证已记录" || bad "Zashboard 归属文件缺失"
+if ! grep -Rqi 'panel/zashboard\|dashboard-root' "$ROOT/install.sh" "$ROOT/deploy/bot/pdg.sh" "$ROOT/deploy/admin/pdg-admin.service" \
+  && grep -q 'rm -rf /opt/pdg-admin/web /opt/pdg-admin/zashboard' "$ROOT/deploy/bot/pdg.sh" \
+  && grep -q '127.0.0.1:9090' "$ROOT/deploy/singbox/config.json.tmpl"; then
+  ok "Zashboard 功能已移除、旧资产会清理且 Clash API 保持本机"
+else
+  bad "Zashboard 功能残留、旧资产未清理或 Clash API 安全边界缺失"
+fi
+grep -q 'set_group_selection' "$ROOT/deploy/bot/pdg_service.py" \
+  && grep -q 'SubscriptionOverrides' "$ROOT/web/src/App.vue" \
+  && grep -q '/api/v1/resources/project/update' "$ROOT/web/src/App.vue" \
+  && ok "PWA 已接入节点固定选择、结构化覆写和在线更新" || bad "PWA 节点管控能力缺失"
 grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \
   && grep -q '/api/v1/subscriptions' "$ROOT/deploy/admin/pdg-admin.py" \
   && grep -q 'refresh_subscriptions' "$ROOT/deploy/bot/scheduled-update.sh" \

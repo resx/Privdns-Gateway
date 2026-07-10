@@ -70,7 +70,7 @@ sudo ./install.sh
      > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。PWA 支持持久化出口、节点订阅、自动分类组、规则集和分流管理；内置 Zashboard 用于实时节点切换、测速、连接和日志。节点订阅支持 Base64/纯 URI 列表和 SIP008，可预览差异并每日自动刷新。两者均要求独立管理令牌，不是只靠来源 IP。
+3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。PWA 集成节点订阅与结构化覆写、分类组自动/固定节点、三目标测速、分流与远程规则集、连接和日志、Geosite/项目在线更新。节点订阅支持 Base64/纯 URI 列表和 SIP008，可预览差异并每日自动刷新。管理端要求独立令牌，不是只靠来源 IP。
 4. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
    Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(带分流代理的普通 Wi-Fi 自动直连、互不干扰);
    bot 生成时还可指定「强制直连」的 Wi-Fi 名单(SSID,治 captive portal 误判)。
@@ -106,7 +106,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 |---|---|---|
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853) |
 | 流量 | **sing-box 1.12** | `direct` 监听 + `sniff_override_destination`(**不用 tproxy**);多出口 urltest 故障切换;clash_api 测速/流量 |
-| 管理 | **Web PWA + Zashboard + Telegram bot** | PWA 管出口订阅/分类/分流；Zashboard 管实时节点/测速/连接；Bot 提供快捷操作；配置事务先 `check`、失败回滚 |
+| 管理 | **Web PWA + Telegram bot** | PWA 管节点/订阅覆写/测速/分流/资源/连接；Bot 提供快捷操作；配置事务先 `check`、失败回滚 |
 | 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 sing-box 占的坑) |
 | 防火墙 | **nftables** | 对全网只留 SSH;DNS/数据/探测口只放行内网卡来源段 |
 

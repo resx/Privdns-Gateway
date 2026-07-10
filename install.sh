@@ -203,16 +203,15 @@ fi
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
-install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot /opt/pdg-admin/web /opt/pdg-admin/zashboard "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot /opt/pdg-admin/web "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/pdg_control.py         /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/pdg_links.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/pdg_service.py         /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/admin/pdg-admin.py         /opt/pdg-admin/
 rm -rf /opt/pdg-admin/web /opt/pdg-admin/zashboard
-install -d /opt/pdg-admin/web /opt/pdg-admin/zashboard
+install -d /opt/pdg-admin/web
 cp -a "$REPO_DIR"/deploy/admin/web/.                        /opt/pdg-admin/web/
-cp -a "$REPO_DIR"/panel/zashboard/.                         /opt/pdg-admin/zashboard/
 install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py       /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/

@@ -17,6 +17,7 @@ from collections import Counter
 
 sys.path.insert(0, os.path.dirname(__file__))
 from pdg_control import (  # noqa: E402
+    GROUP_TYPES,
     PROXY_TYPES,
     SingBoxControl,
     concrete_tags,
@@ -41,7 +42,7 @@ CERT = os.environ.get("PDG_CERT", "/etc/mosdns/certs/fullchain.pem")
 CERT_DIR = os.path.dirname(CERT)
 ADMIN_TOKEN_FILE = "/etc/privdns-gateway/admin.token"
 CLASH = "http://127.0.0.1:9090"
-DELAY_URL = "http://www.gstatic.com/generate_204"
+DELAY_URL = "https://www.gstatic.com/generate_204"
 API = "https://api.telegram.org/bot" + TOKEN
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
@@ -227,9 +228,13 @@ def add_group(name, members):
         return False, "故障切换组至少要 2 个出口"
     def mod(cc):
         for o in cc["outbounds"]:           # 已存在则原地改成员(保留在列表中的位置)
-            if o.get("tag") == name and o.get("type") == "urltest":
+            if o.get("tag") == name and o.get("type") in GROUP_TYPES:
                 o["outbounds"] = members
-                o.setdefault("url", DELAY_URL); o.setdefault("interval", "3m"); o.setdefault("tolerance", 50)
+                if o.get("type") == "selector":
+                    if o.get("default") not in members:
+                        o["default"] = members[0]
+                else:
+                    o.setdefault("url", DELAY_URL); o.setdefault("interval", "3m"); o.setdefault("tolerance", 50)
                 return
         cc["outbounds"].append({"type": "urltest", "tag": name, "outbounds": members,
                                 "url": DELAY_URL, "interval": "3m", "tolerance": 50})
@@ -931,8 +936,10 @@ def rename_exit(old, new):
         for o in cc["outbounds"]:
             if o.get("tag") == old:
                 o["tag"] = new
-            if o.get("type") == "urltest":
+            if o.get("type") in GROUP_TYPES:
                 o["outbounds"] = [new if m == old else m for m in o.get("outbounds", [])]
+                if o.get("type") == "selector" and o.get("default") == old:
+                    o["default"] = new
         for r in cc["route"]["rules"]:
             if r.get("outbound") == old:
                 r["outbound"] = new
@@ -950,7 +957,7 @@ def rename_exit(old, new):
     return True, f"✅ 出口 <b>{old}</b> 已改名 <b>{new}</b>, 分流规则/故障组/默认出口里的引用已同步。"
 
 def urltest_groups(c):
-    return [o["tag"] for o in c["outbounds"] if o.get("type") == "urltest"]
+    return [o["tag"] for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
 
 # ── Telegram 独立 SOCKS5(tg-proxy 入口)的出口选择 ──
 TG_INBOUND = "tg-proxy"
@@ -1253,21 +1260,6 @@ def _admin_url():
     return f"https://{_dot_host()}:9443/#token={urllib.parse.quote(token, safe='')}" if len(token) >= 32 else ""
 
 
-def _zashboard_url():
-    try:
-        token = open(ADMIN_TOKEN_FILE, encoding="utf-8").read().strip()
-    except OSError:
-        return ""
-    if len(token) < 32:
-        return ""
-    query = urllib.parse.urlencode({
-        "hostname": _dot_host(), "port": "9443", "https": "1",
-        "secondaryPath": "/zashboard/api", "secret": token, "type": "clash",
-        "label": "PrivDNS Gateway", "disableUpgradeCore": "1", "disableTunMode": "1",
-    })
-    return f"https://{_dot_host()}:9443/zashboard/#/setup?{query}"
-
-
 def _mask_host(host):
     """出口预览只显示可辨认的脱敏地址，不回显凭据。"""
     host = str(host or "?")
@@ -1294,7 +1286,7 @@ def outbound_preview(ob):
 
 
 def _groups_desc(c):
-    g = [o for o in c["outbounds"] if o.get("type") == "urltest"]
+    g = [o for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
     return "\n".join(f"🔀 故障组 <b>{o['tag']}</b>: {' › '.join(o.get('outbounds', []))}" for o in g)
 
 def status_text():
@@ -1328,8 +1320,9 @@ def exits_text():
     for o in c["outbounds"]:
         if o.get("type") == "direct":
             lines.append(f'• <b>{o["tag"]}</b>  direct（本机直出）')
-        elif o.get("type") == "urltest":
-            lines.append(f'• <b>{o["tag"]}</b>  故障组 → {" › ".join(o.get("outbounds", []))}')
+        elif o.get("type") in GROUP_TYPES:
+            mode = f'固定 {o.get("default")}' if o.get("type") == "selector" else "自动优选"
+            lines.append(f'• <b>{o["tag"]}</b>  故障组({mode}) → {" › ".join(o.get("outbounds", []))}')
     return "出口:\n" + ("\n".join(lines) or "(无)")
 
 def rules_text():
@@ -1457,7 +1450,7 @@ def handle_cb(chat, mid, data):
     if data.startswith("egrp:"):
         name = data[5:]; state[chat] = "edit_grp:" + name
         cur = next((o.get("outbounds", []) for o in load()["outbounds"]
-                    if o.get("tag") == name and o.get("type") == "urltest"), [])
+                    if o.get("tag") == name and o.get("type") in GROUP_TYPES), [])
         edit(chat, mid, f"发 <b>{name}</b> 组的新成员(空格分隔, 按顺序, 至少2个)。\n"
              f"当前: <code>{' '.join(cur) or '空'}</code>\n可选: {', '.join(concrete_tags(load()))}\n"
              f"例: <code>hk tw us</code>\n/cancel 取消。", EXIT_BACK); return
@@ -1505,13 +1498,10 @@ def handle_cb(chat, mid, data):
         url = _admin_url()
         if not url:
             edit(chat, mid, "管理令牌尚未生成。请在服务器运行 <code>sudo pdg admin</code>。", BACK); return
-        dashboard_url = _zashboard_url()
-        rows = [[{"text": "打开管理面板", "url": url}]]
-        if dashboard_url:
-            rows.append([{"text": "实时节点面板", "url": dashboard_url}])
-        rows.extend([[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
-                     [{"text": "🏠 主菜单", "callback_data": "menu"}]])
-        edit(chat, mid, "🖥 <b>PrivDNS 管理面板</b>\n常规出口和分流修改使用管理面板；实时节点、测速和连接使用 Zashboard。令牌只保存在链接片段中。",
+        rows = [[{"text": "打开管理面板", "url": url}],
+                [{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                [{"text": "🏠 主菜单", "callback_data": "menu"}]]
+        edit(chat, mid, "🖥 <b>PrivDNS 管理面板</b>\n节点、测速、订阅覆写、分流、资源更新和连接管理均已集成。令牌只保存在链接片段中。",
              {"inline_keyboard": rows}); return
     if data == "tgexit":
         c = load(); cur = _tg_exit(c)
@@ -1709,10 +1699,7 @@ def handle_text(chat, text):
             url = _admin_url()
             if not url:
                 send_plain(chat, "管理令牌尚未生成，请在服务器运行 sudo pdg admin。"); return
-            dashboard_url = _zashboard_url()
             rows = [[{"text": "打开管理面板", "url": url}]]
-            if dashboard_url:
-                rows.append([{"text": "实时节点面板", "url": dashboard_url}])
             send(chat, "管理面板仅在内网卡网络下可达。", {"inline_keyboard": [*rows, *_back_rows(BACK)]}); return
         if cmd == "/ios":
             try:

@@ -4,7 +4,7 @@ After=network-online.target mosdns.service sing-box.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/python3 /opt/pdg-admin/pdg-admin.py --port 9443 --token-file /etc/privdns-gateway/admin.token --web-root /opt/pdg-admin/web --dashboard-root /opt/pdg-admin/zashboard --cert /etc/mosdns/certs/fullchain.pem --key /etc/mosdns/certs/privkey.pem
+ExecStart=/usr/bin/python3 /opt/pdg-admin/pdg-admin.py --port 9443 --token-file /etc/privdns-gateway/admin.token --web-root /opt/pdg-admin/web --cert /etc/mosdns/certs/fullchain.pem --key /etc/mosdns/certs/privkey.pem
 Restart=on-failure
 RestartSec=3
 UMask=0077

@@ -17,7 +17,7 @@ cfg = {
         {"type": "direct", "tag": "jp"},
         {"type": "shadowsocks", "tag": "hk", "server": "203.0.113.10", "server_port": 1},
         {"type": "shadowsocks", "tag": "tw", "server": "203.0.113.11", "server_port": 1},
-        {"type": "urltest", "tag": "auto", "outbounds": ["hk", "tw"]},
+        {"type": "selector", "tag": "auto", "outbounds": ["hk", "tw"], "default": "hk"},
     ],
     "route": {
         "rules": [
@@ -54,6 +54,7 @@ tags = [o["tag"] for o in cfg["outbounds"]]
 assert "hk2" in tags and "hk" not in tags
 auto = next(o for o in cfg["outbounds"] if o["tag"] == "auto")
 assert auto["outbounds"] == ["hk2", "tw"], auto              # 故障组成员
+assert auto["default"] == "hk2"                               # 固定组当前节点
 assert all(r.get("outbound") != "hk" for r in cfg["route"]["rules"])
 tg = next(r for r in cfg["route"]["rules"] if r.get("inbound") == ["tg-proxy"])
 assert tg["outbound"] == "hk2"                               # TG 出口规则
@@ -66,7 +67,7 @@ assert "hk2" in msg and "已改名" in msg
 # ── 改故障组名: auto → main, 指向组的规则级联 ──
 ok, msg = bot.rename_exit("auto", "main")
 assert ok, msg
-assert any(o["tag"] == "main" and o["type"] == "urltest" for o in cfg["outbounds"])
+assert any(o["tag"] == "main" and o["type"] == "selector" for o in cfg["outbounds"])
 zr = next(r for r in cfg["route"]["rules"] if r.get("domain_suffix") == ["z.com"])
 assert zr["outbound"] == "main"
 

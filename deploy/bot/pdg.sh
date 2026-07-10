@@ -461,15 +461,11 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg_control.py        /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/pdg_links.py          /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/pdg_service.py        /opt/pdg-bot/
-  install -d /opt/pdg-admin/web /opt/pdg-admin/zashboard
+  install -d /opt/pdg-admin/web
   install -m755 "$REPO_DIR"/deploy/admin/pdg-admin.py        /opt/pdg-admin/
   rm -rf /opt/pdg-admin/web /opt/pdg-admin/zashboard
-  install -d /opt/pdg-admin/web /opt/pdg-admin/zashboard
+  install -d /opt/pdg-admin/web
   cp -a "$REPO_DIR"/deploy/admin/web/.                       /opt/pdg-admin/web/
-  cp -a "$REPO_DIR"/panel/zashboard/.                        /opt/pdg-admin/zashboard/
-  if [[ ! -s /opt/pdg-admin/zashboard/index.html ]]; then
-    c_y "Zashboard 静态资源部署失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
-  fi
   install -m644 "$REPO_DIR"/deploy/admin/pdg-admin.service   /etc/systemd/system/
   install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
@@ -560,7 +556,6 @@ cmd_admin(){
   host=$(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo '?')
   token=$(cat "$token_file")
   echo "管理端(仅内网卡可达): https://${host}:9443/#token=${token}"
-  echo "实时节点面板: https://${host}:9443/zashboard/#/setup?hostname=${host}&port=9443&https=1&secondaryPath=%2Fzashboard%2Fapi&secret=${token}&type=clash&label=PrivDNS%20Gateway&disableUpgradeCore=1&disableTunMode=1"
 }
 
 cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-admin pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-admin / pdg-probe81"; }
