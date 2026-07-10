@@ -60,9 +60,11 @@ if grep -q '/api/v1/rulesets' "$ROOT/web/src/App.vue" && grep -q '/api/v1/connec
 fi
 grep -q 'panel/zashboard' "$ROOT/install.sh" \
   && grep -q 'panel/zashboard' "$ROOT/deploy/bot/pdg.sh" \
+  && grep -q '! -s /opt/pdg-admin/zashboard/index.html' "$ROOT/deploy/bot/pdg.sh" \
+  && grep -q 'check_zashboard_assets' "$ROOT/deploy/bot/checks.py" \
   && grep -q '/zashboard/api' "$ROOT/deploy/admin/pdg-admin.py" \
   && grep -q '127.0.0.1:9090' "$ROOT/deploy/singbox/config.json.tmpl" \
-  && ok "Zashboard 经 9443 受限代理部署,Clash API 保持本机" || bad "Zashboard 部署或安全边界缺失"
+  && ok "Zashboard 经 9443 受限代理部署且资源受检,Clash API 保持本机" || bad "Zashboard 部署、自检或安全边界缺失"
 [[ -f "$ROOT/panel/zashboard/LICENSE" && -f "$ROOT/panel/zashboard/UPSTREAM.md" ]] \
   && ok "Zashboard 上游版本与许可证已记录" || bad "Zashboard 归属文件缺失"
 grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \

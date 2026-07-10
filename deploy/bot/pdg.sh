@@ -467,6 +467,9 @@ cmd_update(){
   install -d /opt/pdg-admin/web /opt/pdg-admin/zashboard
   cp -a "$REPO_DIR"/deploy/admin/web/.                       /opt/pdg-admin/web/
   cp -a "$REPO_DIR"/panel/zashboard/.                        /opt/pdg-admin/zashboard/
+  if [[ ! -s /opt/pdg-admin/zashboard/index.html ]]; then
+    c_y "Zashboard 静态资源部署失败, 回滚到更新前快照…"; cmd_rollback 0; return 1
+  fi
   install -m644 "$REPO_DIR"/deploy/admin/pdg-admin.service   /etc/systemd/system/
   install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/

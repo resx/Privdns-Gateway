@@ -6,6 +6,7 @@ import os, re, json, ipaddress, subprocess, urllib.request
 SB = "/etc/sing-box/config.json"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
+ZASHBOARD_ROOT = "/opt/pdg-admin/zashboard"
 
 def _run(cmd, t=10):
     try:
@@ -196,6 +197,13 @@ def check_singbox_config():
     return ("ok", "sing-box 配置", "check 通过") if rc == 0 \
         else ("fail", "sing-box 配置", "check 失败: " + (out + err)[-200:])
 
+def check_zashboard_assets():
+    index = os.path.join(ZASHBOARD_ROOT, "index.html")
+    if os.path.isfile(index):
+        return ("ok", "Zashboard 资源", f"{index} 存在")
+    return ("warn", "Zashboard 资源",
+            f"{index} 缺失, 实时节点面板会返回 404; 请再次运行 sudo pdg update")
+
 # ── 深度(慢速)端到端检查: `pdg doctor --deep` 用, 仍只读 ──
 def check_deep_dot_handshake():
     d = _dot_domain()
@@ -342,7 +350,8 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_singbox_config]
+       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_singbox_config,
+       check_zashboard_assets]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加
