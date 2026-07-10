@@ -2,17 +2,17 @@
 
 ## Project Structure & Module Organization
 
-`install.sh` provisions the gateway. DNS and traffic templates are `deploy/mosdns/config.yaml` and `deploy/singbox/config.json.tmpl`. `deploy/bot/` contains the Telegram UI, shared control/services, lifecycle CLI, and diagnostics. `deploy/admin/` holds the HTTPS API, systemd unit, and built PWA; editable Vue/TypeScript source is in `web/`. Shell helpers are in `lib/`, tests in `tests/`, and operator docs in `docs/`. Avoid `docs/images/` and `lib/versions.sh` unless changing assets or pinned binaries.
+`install.sh` provisions the gateway. DNS and traffic templates are `deploy/mosdns/config.yaml` and `deploy/singbox/config.json.tmpl`. `deploy/bot/` contains the Telegram UI, shared control/services, lifecycle CLI, and diagnostics. `deploy/admin/` holds the HTTPS API, unit, and built PWA; Vue/TypeScript source is in `web/`. `panel/zashboard/` is a pinned upstream static distribution. Shell helpers are in `lib/`, tests in `tests/`, and operator docs in `docs/`. Avoid `docs/images/` and `lib/versions.sh` unless changing assets or pinned binaries.
 
 ## Core Business Workflows
 
 1. Phones send DoT queries to mosdns on port 853. It checks the carrier CIDR, resolves direct domains through configured upstreams, and rewrites proxy-domain A records to the gateway while suppressing AAAA/HTTPS responses.
 2. Rewritten traffic reaches sing-box on ports 80/443. SNI or Host selects a direct or node outbound; GMS ports 5228–5230 use `gms-mtalk`. nftables restricts these entries to the internal CIDR.
-3. Telegram and the authenticated PWA manage exits and routing. Both call shared services; sing-box writes follow lock → validate → atomic replace → restart → rollback. `pdg` handles lifecycle and diagnostics. The PWA/API uses HTTPS 9443, restricted to the carrier CIDR.
+3. Telegram and the PWA manage exits and routing through shared services; sing-box writes follow lock → validate → atomic replace → restart → rollback. `pdg` handles lifecycle. HTTPS 9443 is restricted to the carrier CIDR.
 
 ## Build and Development Commands
 
-There is no compile step. Run CI’s focused checks:
+There is no compile step. Run CI checks:
 
 ```bash
 python3 -m py_compile deploy/{bot,admin}/*.py tests/*.py
@@ -38,4 +38,4 @@ mosdns is the policy engine, sing-box the data plane, `pdg_service.py` the manag
 
 ## Agent-Specific Instructions
 
-Keep changes minimal. Never write sing-box configuration outside `pdg_control.py` or expose port 9090. Rebuild `deploy/admin/web/` after `web/` changes. Test migrations, API authentication, and routing; preserve unrelated working-tree edits.
+Keep changes minimal. Never write sing-box configuration outside `pdg_control.py` or expose port 9090. Rebuild `deploy/admin/web/` after `web/` changes. Do not hand-edit Zashboard assets; retain its license and release record. Test migrations, API authentication, and routing; preserve unrelated edits.

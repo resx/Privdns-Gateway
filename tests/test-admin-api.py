@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """pdg-admin HTTP 鉴权、路由与静态资源回归。"""
+import base64
+import hashlib
 import http.client
 import importlib.util
 import json
+import socket
 import sys
 import tempfile
 import threading
@@ -18,8 +21,9 @@ spec.loader.exec_module(admin)
 
 
 class FakeService:
-    def __init__(self):
+    def __init__(self, clash_url="http://127.0.0.1:9090"):
         self.calls = []
+        self.clash_url = clash_url
 
     def overview(self): return {"default_exit": "jp"}
     def list_exits(self): return [{"tag": "jp"}]
@@ -65,11 +69,38 @@ def request(port, method, path, token=None, body=None):
 
 
 with tempfile.TemporaryDirectory() as directory:
-    web = Path(directory)
+    root = Path(directory)
+    web = root / "web"; web.mkdir()
+    dashboard = root / "dashboard"; dashboard.mkdir()
     web.joinpath("index.html").write_text("<h1>PDG</h1>", encoding="utf-8")
-    service = FakeService()
+    dashboard.joinpath("index.html").write_text("<h1>Zashboard</h1>", encoding="utf-8")
+
+    class ClashHandler(admin.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.server.calls.append((self.path, None))
+            if self.headers.get("Upgrade", "").lower() == "websocket":
+                key = self.headers["Sec-WebSocket-Key"]
+                accept = base64.b64encode(hashlib.sha1(
+                    (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                ).digest()).decode()
+                self.send_response(101); self.send_header("Upgrade", "websocket")
+                self.send_header("Connection", "Upgrade"); self.send_header("Sec-WebSocket-Accept", accept)
+                self.end_headers(); self.wfile.write(b"\x81\x02{}"); self.wfile.flush()
+                return
+            payload = json.dumps({"proxies": {"auto": {"type": "Selector", "now": "hk"}}}).encode()
+            self.send_response(200); self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload))); self.end_headers(); self.wfile.write(payload)
+        def do_PUT(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            self.server.calls.append((self.path, json.loads(body)))
+            self.send_response(204); self.send_header("Content-Length", "0"); self.end_headers()
+        def log_message(self, *_): pass
+
+    clash = admin.ThreadingHTTPServer(("127.0.0.1", 0), ClashHandler); clash.calls = []
+    clash_thread = threading.Thread(target=clash.serve_forever, daemon=True); clash_thread.start()
+    service = FakeService(f"http://127.0.0.1:{clash.server_address[1]}")
     token = "a" * 64
-    server = admin.create_server("127.0.0.1", 0, token, str(web), service)
+    server = admin.create_server("127.0.0.1", 0, token, str(web), service, str(dashboard))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     port = server.server_address[1]
@@ -109,6 +140,42 @@ with tempfile.TemporaryDirectory() as directory:
         status, _, payload = request(port, "GET", "/api/v1/logs", token)
         assert status == 200 and json.loads(payload)["data"]["lines"] == ["ok"]
 
+        status, headers, _ = request(port, "GET", "/zashboard")
+        assert status == 308 and headers["Location"] == "/zashboard/"
+        status, _, payload = request(port, "GET", "/zashboard/")
+        assert status == 200 and payload == b"<h1>Zashboard</h1>"
+        status, _, payload = request(port, "GET", "/zashboard/api/proxies")
+        assert status == 401
+        status, _, payload = request(port, "GET", f"/zashboard/api/proxies?token={token}")
+        assert status == 200 and clash.calls[-1] == ("/proxies", None)
+        status, _, payload = request(port, "GET", "/zashboard/api/proxies", token)
+        assert status == 200 and json.loads(payload)["proxies"]["auto"]["now"] == "hk"
+        status, _, _ = request(port, "GET", "/zashboard/api/proxies/hk/delay?timeout=5000", token)
+        assert status == 200 and clash.calls[-1] == ("/proxies/hk/delay?timeout=5000", None)
+        status, _, _ = request(port, "PUT", "/zashboard/api/proxies/auto", token, {"name": "tw"})
+        assert status == 204 and clash.calls[-1] == ("/proxies/auto", {"name": "tw"})
+        status, _, _ = request(port, "PUT", "/zashboard/api/proxies/GLOBAL", token, {"name": "tw"})
+        assert status == 204 and service.calls[-1] == ("final", "tw")
+        status, _, payload = request(port, "PUT", "/zashboard/api/configs", token, {"mode": "direct"})
+        assert status == 403 and json.loads(payload)["error"]["code"] == "proxy_denied"
+        status, _, payload = request(port, "POST", "/zashboard/api/restart", token, {})
+        assert status == 403
+
+        websocket = socket.create_connection(("127.0.0.1", port), timeout=5)
+        websocket.sendall((
+            f"GET /zashboard/api/traffic?token={token} HTTP/1.1\r\n"
+            f"Host: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        ).encode())
+        handshake = bytearray()
+        while b"\x81\x02{}" not in handshake:
+            chunk = websocket.recv(4096)
+            if not chunk: break
+            handshake.extend(chunk)
+        websocket.close()
+        assert b" 101 " in handshake
+        assert clash.calls[-1] == ("/traffic", None)
+
         status, _, payload = request(port, "GET", "/healthz")
         assert status == 200 and json.loads(payload)["status"] == "ok"
         status, headers, payload = request(port, "GET", "/")
@@ -121,5 +188,8 @@ with tempfile.TemporaryDirectory() as directory:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+        clash.shutdown()
+        clash.server_close()
+        clash_thread.join(timeout=5)
 
 print("admin-api regression OK")

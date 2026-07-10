@@ -1,6 +1,6 @@
 # 管理端
 
-PrivDNS Gateway 提供移动端优先的独立 PWA。它与 Telegram Bot 共用配置控制层，不直接暴露 sing-box Clash API。
+PrivDNS Gateway 提供移动端优先的独立 PWA，并集成 Zashboard 实时节点面板。PWA 与 Telegram Bot 共用配置控制层；Zashboard 仅通过 9443 上受令牌保护的受限代理访问 Clash API，`127.0.0.1:9090` 不对外暴露。
 
 ## 访问与认证
 
@@ -19,7 +19,7 @@ sudo pdg admin --rotate  # 令牌泄露时轮换;旧链接立即失效
 
 也可在 Telegram Bot 中选择「📱 客户端 → 🖥 管理面板」。令牌放在 URL fragment (`#token=...`) 中，浏览器首次打开后保存到本地存储并立即从地址栏移除；fragment 不会出现在 HTTP 请求和服务端访问日志中。
 
-管理链接拥有完整配置权限。不要分享、截图或放入公开书签。Clash API 必须继续监听 `127.0.0.1:9090`。
+管理链接拥有完整配置权限。不要分享、截图或放入公开书签。Zashboard selector 切换属于运行时选择，可能在 sing-box 重启后恢复；需要持久化时应在 PWA 中切换默认出口或分流目标。Clash API 必须继续监听 `127.0.0.1:9090`。
 
 ## 功能与 API
 
@@ -34,10 +34,11 @@ sudo pdg admin --rotate  # 令牌泄露时轮换;旧链接立即失效
 | 路由模拟 | `POST /api/v1/route/test` |
 | 规则集管理 | `GET/POST /api/v1/rulesets`, `PUT/DELETE /api/v1/rulesets/{tag}`, `POST .../{tag}/refresh` |
 | 活动连接 | `GET/DELETE /api/v1/connections`, `DELETE /api/v1/connections/{id}` |
+| 实时节点面板 | `/zashboard/`；受限 Clash 代理为 `/zashboard/api/` |
 | 服务日志 | `GET /api/v1/logs` |
 | 进程存活 | `GET /healthz`（不返回配置） |
 
-API 从不返回节点密码、UUID 或完整服务器地址。连接和日志可能包含访问域名/IP,只应在可信设备查看。所有 sing-box 变更通过 `deploy/bot/pdg_control.py` 执行锁定、候选校验、原子替换和失败回滚。规则集下载仅接受 HTTP/HTTPS,单文件限制 16MB。
+API 从不返回节点密码或 UUID；Zashboard 的 Clash 视图可能显示完整节点地址、连接域名和 IP，只应在可信设备查看。Zashboard 只允许查询、selector 节点切换和连接终止，拒绝 `/configs`、核心重启、升级等写操作。持久化默认出口、故障组和分流仍由 PWA/Bot 调用 `deploy/bot/pdg_control.py`，执行锁定、候选校验、原子替换和失败回滚。规则集下载仅接受 HTTP/HTTPS，单文件限制 16MB。
 
 ## 前端开发
 

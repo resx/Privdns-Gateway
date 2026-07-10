@@ -58,6 +58,13 @@ done
 if grep -q '/api/v1/rulesets' "$ROOT/web/src/App.vue" && grep -q '/api/v1/connections' "$ROOT/web/src/App.vue"; then
   ok "PWA 已接入规则集和连接页面"
 fi
+grep -q 'panel/zashboard' "$ROOT/install.sh" \
+  && grep -q 'panel/zashboard' "$ROOT/deploy/bot/pdg.sh" \
+  && grep -q '/zashboard/api' "$ROOT/deploy/admin/pdg-admin.py" \
+  && grep -q '127.0.0.1:9090' "$ROOT/deploy/singbox/config.json.tmpl" \
+  && ok "Zashboard 经 9443 受限代理部署,Clash API 保持本机" || bad "Zashboard 部署或安全边界缺失"
+[[ -f "$ROOT/panel/zashboard/LICENSE" && -f "$ROOT/panel/zashboard/UPSTREAM.md" ]] \
+  && ok "Zashboard 上游版本与许可证已记录" || bad "Zashboard 归属文件缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"

@@ -1253,6 +1253,21 @@ def _admin_url():
     return f"https://{_dot_host()}:9443/#token={urllib.parse.quote(token, safe='')}" if len(token) >= 32 else ""
 
 
+def _zashboard_url():
+    try:
+        token = open(ADMIN_TOKEN_FILE, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    if len(token) < 32:
+        return ""
+    query = urllib.parse.urlencode({
+        "hostname": _dot_host(), "port": "9443", "https": "1",
+        "secondaryPath": "/zashboard/api", "secret": token, "type": "clash",
+        "label": "PrivDNS Gateway", "disableUpgradeCore": "1", "disableTunMode": "1",
+    })
+    return f"https://{_dot_host()}:9443/zashboard/#/setup?{query}"
+
+
 def _mask_host(host):
     """出口预览只显示可辨认的脱敏地址，不回显凭据。"""
     host = str(host or "?")
@@ -1490,10 +1505,14 @@ def handle_cb(chat, mid, data):
         url = _admin_url()
         if not url:
             edit(chat, mid, "管理令牌尚未生成。请在服务器运行 <code>sudo pdg admin</code>。", BACK); return
-        edit(chat, mid, "🖥 <b>PrivDNS 管理面板</b>\n仅在手机走内网卡、能访问网关时打开。令牌只保存在链接片段中，不会发送给 Web 服务器日志。",
-             {"inline_keyboard": [[{"text": "打开管理面板", "url": url}],
-                                  [{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
-                                  [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
+        dashboard_url = _zashboard_url()
+        rows = [[{"text": "打开管理面板", "url": url}]]
+        if dashboard_url:
+            rows.append([{"text": "实时节点面板", "url": dashboard_url}])
+        rows.extend([[{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                     [{"text": "🏠 主菜单", "callback_data": "menu"}]])
+        edit(chat, mid, "🖥 <b>PrivDNS 管理面板</b>\n常规出口和分流修改使用管理面板；实时节点、测速和连接使用 Zashboard。令牌只保存在链接片段中。",
+             {"inline_keyboard": rows}); return
     if data == "tgexit":
         c = load(); cur = _tg_exit(c)
         rows = [[{"text": ("✓ " if t == cur else "") + t, "callback_data": "tgx:" + t}] for t in exit_tags(c)]
@@ -1690,8 +1709,11 @@ def handle_text(chat, text):
             url = _admin_url()
             if not url:
                 send_plain(chat, "管理令牌尚未生成，请在服务器运行 sudo pdg admin。"); return
-            send(chat, "管理面板仅在内网卡网络下可达。", {"inline_keyboard": [
-                [{"text": "打开管理面板", "url": url}], *_back_rows(BACK)]}); return
+            dashboard_url = _zashboard_url()
+            rows = [[{"text": "打开管理面板", "url": url}]]
+            if dashboard_url:
+                rows.append([{"text": "实时节点面板", "url": dashboard_url}])
+            send(chat, "管理面板仅在内网卡网络下可达。", {"inline_keyboard": [*rows, *_back_rows(BACK)]}); return
         if cmd == "/ios":
             try:
                 send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")

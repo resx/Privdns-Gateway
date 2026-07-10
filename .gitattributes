@@ -1,0 +1,2 @@
+# Third-party generated Zashboard distribution; preserve bytes from the verified release.
+panel/zashboard/** -text whitespace=-trailing-space

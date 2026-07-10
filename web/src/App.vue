@@ -221,6 +221,10 @@ async function addExit() {
   }
 }
 
+function finalTargetChange(event: Event) {
+  setFinal((event.target as HTMLSelectElement).value)
+}
+
 async function setFinal(tag: string) {
   error.value = ''
   try {
@@ -360,6 +364,23 @@ async function updateRuleset(item: Ruleset, target?: string) {
   }
 }
 
+function ruleTargetChange(item: Rule, event: Event) {
+  saveExistingRule(item, (event.target as HTMLSelectElement).value)
+}
+
+async function saveExistingRule(item: Rule, target: string) {
+  error.value = ''
+  try {
+    await api('/api/v1/rules', {
+      method: 'POST', body: JSON.stringify({ domain: item.value, target }),
+    })
+    flash(`${item.label} → ${target}`)
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
 function rulesetTargetChange(item: Ruleset, event: Event) {
   updateRuleset(item, (event.target as HTMLSelectElement).value)
 }
@@ -424,6 +445,21 @@ async function selectPage(next: Page) {
     runtimeTimer = window.setInterval(loadRuntime, 5000)
   }
   if (next === 'system') await loadLogs()
+}
+
+function openZashboard() {
+  const parameters = new URLSearchParams({
+    hostname: location.hostname,
+    port: location.port || '443',
+    https: '1',
+    secondaryPath: '/zashboard/api',
+    secret: token.value,
+    type: 'clash',
+    label: 'PrivDNS Gateway',
+    disableUpgradeCore: '1',
+    disableTunMode: '1',
+  })
+  window.open(`/zashboard/#/setup?${parameters}`, '_blank', 'noopener,noreferrer')
 }
 
 function formatBytes(value: number) {
@@ -495,6 +531,9 @@ onBeforeUnmount(() => {
             <p class="eyebrow">DEFAULT ROUTE</p>
             <h2>{{ overview.default_exit || '未设置' }}</h2>
             <p class="muted">未命中显式分流规则的国际流量</p>
+            <select class="quick-final" :value="overview.default_exit" @change="finalTargetChange">
+              <option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }} · {{ item.type }}</option>
+            </select>
           </div>
           <div class="pulse" :class="{ down: Object.values(overview.services).some(value => value !== 'active') }"></div>
         </section>
@@ -516,6 +555,7 @@ onBeforeUnmount(() => {
 
       <template v-if="page === 'exits'">
         <div class="section-actions">
+          <button class="secondary" @click="openZashboard">实时节点</button>
           <button class="secondary" :disabled="testing" @click="testExits">{{ testing ? '测速中…' : '批量测速' }}</button>
           <button class="secondary" @click="editGroup()">＋ 故障组</button>
           <button class="primary" @click="showAdd = !showAdd; preview = null">＋ 添加出口</button>
@@ -601,7 +641,11 @@ onBeforeUnmount(() => {
           <div class="rule-list">
             <div v-for="item in filteredRules" :key="`${item.kind}-${item.value}-${item.target}`" class="rule-row">
               <div><span class="kind">{{ item.kind === 'ruleset' ? '规则集' : item.kind === 'direct' ? '直连' : '域名' }}</span><strong>{{ item.label }}</strong></div>
-              <div class="rule-target"><span>→</span><strong>{{ item.target }}</strong></div>
+              <div v-if="item.kind === 'ruleset'" class="rule-target"><span>→</span><strong>{{ item.target }}</strong></div>
+              <select v-else class="quick-target" :value="item.target" @change="ruleTargetChange(item, $event)">
+                <option value="direct">direct</option>
+                <option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option>
+              </select>
               <span v-if="item.count" class="muted">{{ item.count }} 条</span>
               <button v-if="item.kind !== 'ruleset'" class="text-danger" @click="removeRule(item)">删除</button>
             </div>
@@ -669,6 +713,7 @@ onBeforeUnmount(() => {
         </section>
         <section class="system-actions">
           <button class="secondary" @click="loadAll">刷新全部状态</button>
+          <button class="secondary" @click="openZashboard">实时节点面板</button>
           <button class="danger-button" @click="logout">退出并清除本机令牌</button>
         </section>
       </template>

@@ -2,6 +2,12 @@
 
 本项目按发布 tag 记录稳定版本;完整提交见 git 历史。
 
+## 2026-07-10 — v2.1.0(Zashboard 实时面板与快速分流管理)
+
+- 集成 Zashboard v3.14.0 no-fonts 静态发行包，在 9443 的 `/zashboard/` 提供实时节点列表、selector 切换、测速和连接视图。
+- 新增同源 `/zashboard/api/` Clash REST 代理，复用管理 Bearer Token，只允许读取、selector 节点切换和连接终止；拒绝核心配置重载、重启和升级，`127.0.0.1:9090` 继续不对外开放。
+- PWA 概览支持直接切换并持久化默认出口，域名分流列表支持直接切换目标；Bot 管理入口同时提供 PWA 和实时节点面板链接。
+
 ## 2026-07-10 — v2.0.1(GMS route-options 兼容修复)
 
 - 修复 GMS/FCM `5228-5230` 迁移候选在 sing-box 1.12.25 下校验失败:不再把已废弃的 `override_address` 写进 direct outbound,改由首条 `action: route` 的 route-options 改写到 `mtalk.google.com`。
