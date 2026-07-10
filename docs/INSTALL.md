@@ -20,7 +20,7 @@
 一行装(脚本会自动把仓库拉到 `/opt/privdns-gateway` 再跑):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/resx/Privdns-Gateway/main/install.sh | sudo bash
 ```
 
 入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 或克隆后运行:
 
 ```bash
-git clone https://github.com/misaka-cpu/privdns-gateway.git
+git clone https://github.com/resx/Privdns-Gateway.git
 cd privdns-gateway
 git fetch --tags
 git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
@@ -47,7 +47,9 @@ sudo ./install.sh
 
 ## 3. 装完
 
-见 [README](../README.md#装完之后):手机设私密 DNS、bot 加出口/分流、iOS 下发描述文件。
+见 [README](../README.md#装完之后):手机设私密 DNS、bot 加出口/分流、打开内网管理面板、iOS 下发描述文件。
+
+管理面板监听 `https://<DoT域名>:9443/`,仅允许 `PDG_INTERNAL_CIDR` 来源,API 还使用 `/etc/privdns-gateway/admin.token` 的 Bearer 令牌。推荐从 bot「📱 客户端 → 🖥 管理面板」进入,或运行 `sudo pdg admin` 显示带令牌链接。该链接等同管理员凭据,不要分享或截图。
 
 默认路由是「**国内直连 / 其余国际从 VPS 直出**」。要把国际流量走你的落地节点,在 bot 里加出口再把 `final` 或具体规则指过去。
 
@@ -60,8 +62,10 @@ sudo ./install.sh
 | 代理域名打不开 | `systemctl status sing-box`;出口加了吗、密码对不对(bot「🚦 测出口」)|
 | 内网卡段填错 | 改 `/etc/mosdns/config.yaml` 的 `npn_clients` 和 `/etc/nftables.conf`,`systemctl restart mosdns && nft -f /etc/nftables.conf` |
 | bot 不理你 | `systemctl status pdg-bot`;token / user id 对不对(`/etc/privdns-gateway/bot.env`)|
+| 管理面板打不开 | 手机是否走内网卡?云安全组是否放行内网段到 9443?`systemctl status pdg-admin` |
+| 面板提示令牌无效 | 重新从 bot 打开,或运行 `sudo pdg admin`;不要手工修改 `admin.token` |
 
-日志:`journalctl -u mosdns -u sing-box -u pdg-bot -n 50`。
+日志:`journalctl -u mosdns -u sing-box -u pdg-bot -u pdg-admin -n 50`。
 
 ## 非交互 / 自动化安装
 
@@ -75,10 +79,12 @@ sudo PDG_NONINTERACTIVE=1 \
      PDG_BOT_TOKEN=123456:xxxx \
      PDG_ALLOWED=11111111 \
      PDG_DOT_DOMAIN=dot.example.com \
+     PDG_ADMIN_TOKEN=至少32字符的随机令牌 \
      ./install.sh
 ```
 
 - 缺省项会自动探测(公网 IP / SSH 端口)或用默认值。
+- `PDG_ADMIN_TOKEN`:可选,预置管理面板令牌(至少 32 字符);不填会用 `openssl rand` 自动生成并保存为 600 权限。
 - `PDG_SKIP_CERT=1`:跳过 certbot,生成**自签占位证书**(先把服务跑起来,之后用 bot「🌐 DoT 自定义域名」补正式证书)。
 - 安装会**自动关闭 systemd-resolved**(它占 `127.0.0.53:53`,与 mosdns 的 `0.0.0.0:53` 冲突)。
 
@@ -96,8 +102,9 @@ sudo PDG_NONINTERACTIVE=1 \
 | 80 | tcp | 仅内网卡段 | sing-box HTTP 入口(嗅 Host) |
 | 53 | tcp+udp | 仅内网卡段 | 明文 DNS |
 | 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点 |
-| 5228-5230 | tcp | 仅内网卡段 | GMS/FCM 推送(mtalk.google.com 原生端口,经 sing-box 嗅探分流) |
-| 9090 | tcp | 仅 127.0.0.1 | sing-box clash_api(bot 用,不对外) |
+| 5228-5230 | tcp | 仅内网卡段 | GMS/FCM 推送(mtalk.google.com 原生端口,经 sing-box 专用入口路由) |
+| 9090 | tcp | 仅 127.0.0.1 | sing-box clash_api(bot/API 用,不对外) |
+| 9443 | tcp | 仅内网卡段 | HTTPS PWA 管理端(另有 Bearer 令牌认证) |
 | 8443 | tcp | 临时·仅内网卡 | `pdg ios` 下发描述文件时短开,用完自动关 |
 
 ⚠️ **证书签发/续期需要从公网访问 80 端口**(Let's Encrypt HTTP-01 校验):签发时 pre-hook 会把 80 临时对全网开放(并停 sing-box),完后还原。

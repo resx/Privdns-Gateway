@@ -16,8 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
       - name: Python 语法 (py_compile)
-        run: python3 -m py_compile deploy/bot/*.py tests/*.py
+        run: python3 -m py_compile deploy/bot/*.py deploy/admin/*.py tests/*.py
 
       - name: Shell 语法 (bash -n)
         run: |
@@ -41,6 +47,12 @@ jobs:
             echo "  OK"
           done
 
+      - name: PWA 类型检查、构建与部署产物一致性
+        run: |
+          npm ci --prefix web
+          npm run build --prefix web
+          diff -qr web/dist deploy/admin/web
+
       - name: mobileconfig 模板是合法 plist/XML
         run: |
           python3 - <<'PY'
@@ -61,7 +73,8 @@ jobs:
             systemd-analyze verify \
               deploy/bot/pdg-bot.service deploy/bot/pdg-health.service \
               deploy/bot/pdg-rules-update.service deploy/bot/pdg-health.timer \
-              deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service || true
+              deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service \
+              deploy/admin/pdg-admin.service || true
             echo "(CI 环境缺二进制/路径, 上面的告警多为预期; 重点看指令拼写/语法错)"
           else
             echo "systemd-analyze 不可用, 跳过"
@@ -90,6 +103,21 @@ jobs:
 
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
+
+      - name: "配置控制事务回归 (锁/校验/原子应用/回滚)"
+        run: python3 tests/test-pdg-control.py
+
+      - name: "管理业务服务回归 (出口/分流 CRUD)"
+        run: python3 tests/test-pdg-service.py
+
+      - name: "管理 API 回归 (鉴权/路由/安全响应头)"
+        run: python3 tests/test-admin-api.py
+
+      - name: "管理端部署回归 (9443/令牌/systemd)"
+        run: bash tests/test-admin-deploy.sh
+
+      - name: "bot 出口交互回归 (预览确认/删除影响/输入重试)"
+        run: python3 tests/test-bot-control-ux.py
 
       - name: "bot 测域名规则集显示名回归"
         run: python3 tests/test-domain-label.py

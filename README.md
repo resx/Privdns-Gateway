@@ -40,7 +40,7 @@ sing-box 嗅探 SNI/Host 后再决定走哪个落地。
 ## 一键安装 (Debian 12+ / Ubuntu 22+)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/resx/Privdns-Gateway/main/install.sh | sudo bash
 ```
 
 入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
@@ -48,14 +48,14 @@ curl -fsSL https://raw.githubusercontent.com/misaka-cpu/privdns-gateway/main/ins
 或克隆后运行(便于先看代码):
 
 ```bash
-git clone https://github.com/misaka-cpu/privdns-gateway.git
+git clone https://github.com/resx/Privdns-Gateway.git
 cd privdns-gateway
 git fetch --tags
 git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
 sudo ./install.sh
 ```
 
-脚本会装好 mosdns、sing-box(1.12)、管理 bot、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
+脚本会装好 mosdns、sing-box(1.12)、管理 bot、内网 HTTPS 管理面板、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
 域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。
 详见 [docs/INSTALL.md](docs/INSTALL.md)。
 
@@ -70,10 +70,11 @@ sudo ./install.sh
      > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
-3. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
+3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。面板支持出口/故障组、规则集、路由测试、活动连接、日志和域名分流;API 还要求独立管理令牌,不是只靠来源 IP。
+4. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
    Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(带分流代理的普通 Wi-Fi 自动直连、互不干扰);
    bot 生成时还可指定「强制直连」的 Wi-Fi 名单(SSID,治 captive portal 误判)。
-4. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
+5. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 
 ## 日常管理
 
@@ -81,6 +82,7 @@ sudo ./install.sh
 sudo pdg            # 进管理菜单
 sudo pdg doctor     # 自检(只读); --json 可脚本化; --deep 加端到端检查(DoT握手/:81/DNS/clash)
 sudo pdg status     # 状态
+sudo pdg admin      # 显示管理面板地址和令牌链接(敏感,不要分享);加 --rotate 轮换令牌
 sudo pdg update     # 更新(更新前自动快照, 失败自动回滚; --dry-run 看待更新)
 sudo pdg snapshot   # 手动留一份配置快照
 sudo pdg rollback   # 回滚到最近快照
@@ -96,7 +98,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 
 > 健康自检每 10 分钟自动跑,服务挂 / DNS 不应答 / 证书快到期会 Telegram 私信你。
 
-> 分工:`pdg` 管**生命周期**(装/更新/卸载/token/状态);**出口 / 分流 / DNS 上游**等运行时配置都在 Telegram bot 里。
+> 分工:`pdg` 管生命周期;PWA 管常用出口/分流;Telegram bot 管快捷操作、规则集、DNS 上游和面板入口。
 
 ## 组成
 
@@ -104,7 +106,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 |---|---|---|
 | DNS | **mosdns v5** | 国内直连 / 代理域名 A 劫持到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853) |
 | 流量 | **sing-box 1.12** | `direct` 监听 + `sniff_override_destination`(**不用 tproxy**);多出口 urltest 故障切换;clash_api 测速/流量 |
-| 管理 | **Telegram bot**(纯标准库) | 出口/分流/规则集/测速/流量/备份恢复/iOS下发/自定义域名,改 sing-box 前 `check`+回滚 |
+| 管理 | **Web PWA + Telegram bot**(后端纯标准库) | PWA 管出口/分流/规则集/连接/日志;bot 负责快捷操作和入口;统一配置事务先 `check`、失败回滚 |
 | 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 sing-box 占的坑) |
 | 防火墙 | **nftables** | 对全网只留 SSH;DNS/数据/探测口只放行内网卡来源段 |
 
@@ -113,6 +115,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 ## 文档
 
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
+- [docs/MANAGEMENT.md](docs/MANAGEMENT.md) — PWA 管理端 / API / 认证 / 前端开发
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
 - [docs/production-notes.md](docs/production-notes.md) — 实战记录与踩坑(sing-box 版本坑、QUIC 自环、ECS、安全加固等)
 - [CHANGELOG.md](CHANGELOG.md) — 更新日志

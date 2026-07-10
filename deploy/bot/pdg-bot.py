@@ -11,9 +11,22 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 sing-box 前备份, chec
 注: 模块可被 import (供定时任务调用 refresh_rulesets), 此时无需 token。
 """
 from __future__ import annotations
-import base64, hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, tarfile, tempfile, threading, time, uuid
+import hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, sys, tarfile, tempfile, threading, time, uuid
 import urllib.parse, urllib.request, urllib.error
 from collections import Counter
+
+sys.path.insert(0, os.path.dirname(__file__))
+from pdg_control import (  # noqa: E402
+    PROXY_TYPES,
+    SingBoxControl,
+    concrete_tags,
+    deletable_tags,
+    exit_tags,
+    outbound_impact,
+    proxy_outbounds,
+)
+from pdg_links import normalize_tag as _tag, parse_link  # noqa: E402
+from pdg_service import GatewayService, ServiceError  # noqa: E402
 
 TOKEN = os.environ.get("PDG_BOT_TOKEN", "")
 ALLOWED = {int(x) for x in os.environ.get("PDG_BOT_ALLOWED", "").replace(" ", "").split(",") if x}
@@ -26,11 +39,13 @@ UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
 IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
 CERT = os.environ.get("PDG_CERT", "/etc/mosdns/certs/fullchain.pem")
 CERT_DIR = os.path.dirname(CERT)
+ADMIN_TOKEN_FILE = "/etc/privdns-gateway/admin.token"
 CLASH = "http://127.0.0.1:9090"
 DELAY_URL = "http://www.gstatic.com/generate_204"
 API = "https://api.telegram.org/bot" + TOKEN
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
+pending_outbound: dict[int, dict] = {}  # 添加出口确认前的脱敏预览数据
 
 # ── Telegram (复用一条 HTTPS 长连接, 省掉每次 TLS 握手 → 按钮响应更快) ──
 _conn = None
@@ -85,12 +100,13 @@ def tg_download(file_id):
     with urllib.request.urlopen(f"https://api.telegram.org/file/bot{TOKEN}/{fp}", timeout=120) as resp:
         return resp.read()
 
-# 一级菜单: 只放常用诊断 + 4 个分类入口 (展开二级, 避免一屏按钮看花眼)
+# 一级菜单优先放高频路由操作，更新和维护收进运维子菜单。
 MENU = {"inline_keyboard": [
-    [{"text": "🔄 更新", "callback_data": "upd_check"}, {"text": "🩺 自检", "callback_data": "doctor"}],
-    [{"text": "🚦 测出口", "callback_data": "test"}, {"text": "📈 流量", "callback_data": "traffic"}],
+    [{"text": "🔎 测域名", "callback_data": "testdom"}, {"text": "🎯 默认出口", "callback_data": "setfinal"}],
     [{"text": "📤 出口管理", "callback_data": "nav:exit"}, {"text": "📑 分流管理", "callback_data": "nav:rule"}],
-    [{"text": "📱 客户端", "callback_data": "nav:client"}, {"text": "🛠 运维", "callback_data": "nav:ops"}],
+    [{"text": "🚦 测出口", "callback_data": "test"}, {"text": "📈 流量", "callback_data": "traffic"}],
+    [{"text": "🩺 自检", "callback_data": "doctor"}, {"text": "📱 客户端", "callback_data": "nav:client"}],
+    [{"text": "🛠 运维", "callback_data": "nav:ops"}],
 ]}
 BACK = {"inline_keyboard": [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
 EXIT_BACK = {"inline_keyboard": [[{"text": "⬅️ 返回出口管理", "callback_data": "nav:exit"}],
@@ -121,13 +137,15 @@ def _nav(key):
              {"text": "🗑 删规则集", "callback_data": "del_rs"}],
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
         "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
+            [{"text": "🖥 管理面板", "callback_data": "admin"}],
             [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
-            [{"text": "🔄 重启服务", "callback_data": "restart"}, {"text": "📦 更新规则库", "callback_data": "updgeo"}],
+            [{"text": "🔄 检查更新", "callback_data": "upd_check"}, {"text": "♻️ 重启服务", "callback_data": "restart"}],
+            [{"text": "📦 更新规则库", "callback_data": "updgeo"}, {"text": "🚀 TFO", "callback_data": "tfo"}],
             [{"text": "💾 备份", "callback_data": "backup"}, {"text": "♻️ 恢复", "callback_data": "restore"}],
-            [{"text": "🌐 DNS 上游", "callback_data": "dnsup"}, {"text": "🚀 TFO", "callback_data": "tfo"}]]),
+            [{"text": "🌐 DNS 上游", "callback_data": "dnsup"}]]),
     }
     title, rows = subs[key]
     return title, {"inline_keyboard": rows + [[{"text": "⬅️ 返回主菜单", "callback_data": "menu"}]]}
@@ -185,270 +203,15 @@ def clash_up():
     except Exception:  # noqa: BLE001
         return False
 
-# ── sing-box ──
+# ── sing-box：所有写入统一经过 pdg_control 的锁、校验和回滚事务 ──
+_sb_control = SingBoxControl(SB, runner=sh)
+_gateway = GatewayService(_sb_control, MOSDNS_DIRECT, RS_META, CLASH)
+
 def load():
-    return json.load(open(SB))
-
-def _write(c):
-    t = SB + ".tmp"
-    with open(t, "w") as f:
-        json.dump(c, f, ensure_ascii=False, indent=2)
-    os.chmod(t, 0o600)        # config.json 含出口密码/uuid, 收紧到 600
-    os.replace(t, SB)
-
-def _svc_active(unit, need=3, delay=0.6, max_polls=15):
-    """确认服务"稳定" active: 要求连续 need 次观测都是 active。
-    systemd 默认 Type=simple, restart 返 0 只代表 exec 成功; 起来又崩(flapping)时单看一次会误判 ——
-    崩溃/重启间隙的 failed/activating 会打断连击, 故要求连续保持才算稳。"""
-    streak = 0
-    for _ in range(max_polls):
-        if sh(["systemctl", "is-active", unit]).stdout.strip() == "active":
-            streak += 1
-            if streak >= need:
-                return True
-        else:
-            streak = 0
-        time.sleep(delay)
-    return False
+    return _sb_control.load()
 
 def apply_sb(modify):
-    shutil.copy(SB, SB + ".botbak"); os.chmod(SB + ".botbak", 0o600)
-    c = load(); modify(c); _write(c)
-    chk = sh(["sing-box", "check", "-c", SB])
-    if chk.returncode != 0:
-        shutil.copy(SB + ".botbak", SB)   # 运行中的 sing-box 没动过(check 只在文件上做), 还原文件即可, 不必重启
-        return False, "配置校验失败,已回滚:\n" + (chk.stdout + chk.stderr)[-400:]
-    sh(["systemctl", "reset-failed", "sing-box"])   # 清掉 start-limit 计数: 连改多条(如连删域名)快速多次重启不会触发限速锁死
-    r = sh(["systemctl", "restart", "sing-box"])
-    if r.returncode != 0 or not _svc_active("sing-box"):   # 没起来/起来又崩, 还原文件再重启一次, 别把代理留在挂掉状态
-        shutil.copy(SB + ".botbak", SB)
-        sh(["systemctl", "reset-failed", "sing-box"]); sh(["systemctl", "restart", "sing-box"])
-        return False, "重启 sing-box 失败, 已还原上一份配置:\n" + (r.stdout + r.stderr)[-300:]
-    return True, ""
-
-# 可作出口的代理协议(决定哪些出站算"出口": 可选默认/故障组成员/测出口/删除)。sing-box 支持的都列上。
-PROXY_TYPES = ("shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
-               "tuic", "anytls", "shadowtls", "socks", "http")
-
-def proxy_outbounds(c):
-    return [o for o in c["outbounds"] if o.get("type") in PROXY_TYPES]
-
-def exit_tags(c):
-    """可作分流目标/默认出口的全部出口 (含 direct 与 urltest 故障组)。"""
-    return [o["tag"] for o in c["outbounds"] if o.get("type") in PROXY_TYPES + ("direct", "urltest")]
-
-def concrete_tags(c):
-    """具体出口 (可作故障组成员; 排除 urltest 组自身, 防嵌套环)。"""
-    return [o["tag"] for o in c["outbounds"] if o.get("type") in PROXY_TYPES + ("direct",)]
-
-def deletable_tags(c):
-    """可删除的出口/组 (代理出口 + urltest 组; 不含 jp direct)。"""
-    return [o["tag"] for o in c["outbounds"] if o.get("type") in PROXY_TYPES + ("urltest",)]
-
-def _tag(name, host, port):
-    return re.sub(r"[^A-Za-z0-9_.-]", "-", (name or f"{host}:{port}"))[:40] or "exit"
-
-# ── 链接解析 (ss/vmess/trojan/vless) ──
-def parse_link(link):
-    link = link.strip()
-    if link.startswith("ss://"):
-        return _parse_ss(link)
-    if link.startswith("vmess://"):
-        return _parse_vmess(link)
-    if link.startswith("trojan://"):
-        return _parse_trojan(link)
-    if link.startswith("vless://"):
-        return _parse_vless(link)                     # 含 reality/flow
-    if link.startswith(("hysteria2://", "hy2://")):
-        return _parse_hysteria2(link)
-    if link.startswith("tuic://"):
-        return _parse_tuic(link)
-    if link.startswith("anytls://"):
-        return _parse_anytls(link)
-    if link.startswith(("socks://", "socks5://")):
-        return _parse_socks(link)
-    if link.startswith(("http://", "https://")):
-        return _parse_http(link)
-    if re.search(r"=\s*ss\s*,", link, re.I):          # Surge 代理行: 名字 = ss, 服务器, 端口, encrypt-method=…, password=…
-        return _parse_surge(link)
-    raise ValueError("支持: ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / "
-                     "anytls:// / socks5:// / http:// 链接, 或 Surge 的 ss 行(名字 = ss, …)")
-
-def _b64(s):
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode("utf-8", "ignore")
-
-def _parse_ss(link):
-    body = link[5:]; tag = ""
-    if "#" in body:
-        body, tag = body.split("#", 1); tag = urllib.parse.unquote(tag).strip()
-    body = body.split("?", 1)[0]
-    if "@" in body:
-        ui, hp = body.rsplit("@", 1)
-        try:
-            method, pw = _b64(ui).split(":", 1)
-        except Exception:
-            method, pw = urllib.parse.unquote(ui).split(":", 1)
-        host, port = hp.rsplit(":", 1)
-    else:
-        head, hp = _b64(body).rsplit("@", 1); method, pw = head.split(":", 1); host, port = hp.rsplit(":", 1)
-    return {"type": "shadowsocks", "tag": _tag(tag, host.strip("[]"), port), "server": host.strip("[]"),
-            "server_port": int(port.split("/")[0]), "method": method, "password": pw}
-
-def _parse_surge(line):
-    """Surge 代理行(目前支持 ss): 名字 = ss, 服务器, 端口, encrypt-method=…, password="…", tfo=true, udp-relay=true"""
-    name, _, rest = line.partition("=")
-    parts = [p.strip() for p in rest.split(",")]
-    if not parts or parts[0].lower() != "ss":
-        raise ValueError("Surge 行暂只支持 ss(其它类型请用 ss:// / vmess:// / trojan:// / vless:// 链接)")
-    if len(parts) < 3:
-        raise ValueError("Surge ss 行格式: 名字 = ss, 服务器, 端口, encrypt-method=…, password=…")
-    server = parts[1].strip("[]"); port = int(parts[2].split("/")[0])
-    kv = {}
-    for p in parts[3:]:                               # key=value(password 里的 base64 可能含 = / +, 故只切第一个 =)
-        if "=" in p:
-            k, v = p.split("=", 1); kv[k.strip().lower()] = v.strip().strip('"').strip("'")
-    method = kv.get("encrypt-method") or kv.get("method")
-    pw = kv.get("password")
-    if not method or not pw:
-        raise ValueError("Surge ss 行缺 encrypt-method 或 password")
-    out = {"type": "shadowsocks", "tag": _tag(name.strip(), server, str(port)),
-           "server": server, "server_port": port, "method": method, "password": pw}
-    if kv.get("tfo", "").lower() in ("true", "1"):    # udp-relay: sing-box ss 出站默认就支持 UDP, 无需额外字段
-        out["tcp_fast_open"] = True
-    return out
-
-def _tls_block(server_name, insecure=False):
-    b = {"enabled": True}
-    if server_name:
-        b["server_name"] = server_name
-    if insecure:
-        b["insecure"] = True
-    return b
-
-def _transport(net, host, path, service=None):
-    if net in ("ws", "websocket"):
-        t = {"type": "ws", "path": path or "/"}
-        if host:
-            t["headers"] = {"Host": host}
-        return t
-    if net == "grpc":                                 # 分享链接 grpc 服务名多在 serviceName=/service_name=, 不在 path
-        return {"type": "grpc", "service_name": service or (path or "").lstrip("/")}
-    return None
-
-def _parse_vmess(link):
-    j = json.loads(_b64(link[8:]))
-    host, port = j["add"], int(j["port"])
-    ob = {"type": "vmess", "tag": _tag(j.get("ps"), host, port), "server": host, "server_port": port,
-          "uuid": j["id"], "alter_id": int(j.get("aid", 0) or 0), "security": j.get("scy") or "auto"}
-    if str(j.get("tls", "")).lower() in ("tls", "true", "1"):
-        ob["tls"] = _tls_block(j.get("sni") or j.get("host") or host)
-    tr = _transport(j.get("net", "tcp"), j.get("host"), j.get("path"))
-    if tr:
-        ob["transport"] = tr
-    return ob
-
-def _qs(u):
-    return {k: v[0] for k, v in urllib.parse.parse_qs(u.query).items()}
-
-def _parse_trojan(link):
-    u = urllib.parse.urlparse(link); q = _qs(u)
-    ob = {"type": "trojan", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-          "server": u.hostname, "server_port": u.port or 443, "password": urllib.parse.unquote(u.username or "")}
-    ob["tls"] = _tls_block(q.get("sni") or q.get("peer") or u.hostname, q.get("allowInsecure") in ("1", "true"))
-    tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"),
-                    q.get("serviceName") or q.get("service_name"))
-    if tr:
-        ob["transport"] = tr
-    return ob
-
-def _parse_vless(link):
-    u = urllib.parse.urlparse(link); q = _qs(u)
-    ob = {"type": "vless", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-          "server": u.hostname, "server_port": u.port or 443, "uuid": u.username, "flow": q.get("flow", "")}
-    if not ob["flow"]:
-        ob.pop("flow")
-    sec = q.get("security")
-    if sec in ("tls", "reality", "xtls"):
-        ob["tls"] = _tls_block(q.get("sni") or u.hostname, q.get("allowInsecure") in ("1", "true"))
-        if sec == "reality":                          # Reality: 公钥 pbk + short_id sid(+ 指纹 fp)
-            ob["tls"]["reality"] = {"enabled": True, "public_key": q.get("pbk", ""), "short_id": q.get("sid", "")}
-        if q.get("fp"):
-            ob["tls"]["utls"] = {"enabled": True, "fingerprint": q["fp"]}
-    tr = _transport(q.get("type", "tcp"), q.get("host"), q.get("path"),
-                    q.get("serviceName") or q.get("service_name"))
-    if tr:
-        ob["transport"] = tr
-    return ob
-
-def _userinfo(u):
-    """URI 用户信息整体取出(hysteria2/anytls 的 password 是单串, 但容错 user:pass 形式)。"""
-    s = u.username or ""
-    if u.password is not None:
-        s += ":" + u.password
-    return urllib.parse.unquote(s)
-
-def _insec(q):
-    return any(q.get(k) in ("1", "true") for k in ("insecure", "allowInsecure", "allow_insecure"))
-
-def _parse_hysteria2(link):
-    u = urllib.parse.urlparse(link); q = _qs(u)
-    ob = {"type": "hysteria2", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-          "server": u.hostname, "server_port": u.port or 443, "password": _userinfo(u),
-          "tls": _tls_block(q.get("sni") or q.get("peer") or u.hostname, _insec(q))}
-    if q.get("obfs"):                                 # 通常是 salamander
-        ob["obfs"] = {"type": q["obfs"], "password": q.get("obfs-password", "")}
-    return ob
-
-def _parse_tuic(link):
-    u = urllib.parse.urlparse(link); q = _qs(u)
-    ob = {"type": "tuic", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-          "server": u.hostname, "server_port": u.port or 443,
-          "uuid": urllib.parse.unquote(u.username or ""), "password": urllib.parse.unquote(u.password or ""),
-          "tls": _tls_block(q.get("sni") or u.hostname, _insec(q))}
-    if q.get("alpn"):
-        ob["tls"]["alpn"] = q["alpn"].split(",")
-    if q.get("congestion_control"):
-        ob["congestion_control"] = q["congestion_control"]
-    if q.get("udp_relay_mode"):
-        ob["udp_relay_mode"] = q["udp_relay_mode"]
-    return ob
-
-def _parse_anytls(link):
-    u = urllib.parse.urlparse(link); q = _qs(u)
-    return {"type": "anytls", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-            "server": u.hostname, "server_port": u.port or 443, "password": _userinfo(u),
-            "tls": _tls_block(q.get("sni") or u.hostname, _insec(q))}
-
-def _parse_socks(link):
-    u = urllib.parse.urlparse(link)
-    ob = {"type": "socks", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-          "server": u.hostname, "server_port": u.port or 1080, "version": "5"}
-    user = urllib.parse.unquote(u.username) if u.username else None
-    pw = urllib.parse.unquote(u.password) if u.password else None
-    if user and pw is None and ":" not in user:       # socks5://base64(user:pass)@host:port 也常见
-        try:
-            d = _b64(user)
-            if ":" in d:
-                user, pw = d.split(":", 1)
-        except Exception:  # noqa: BLE001
-            pass
-    if user:
-        ob["username"] = user
-    if pw:
-        ob["password"] = pw
-    return ob
-
-def _parse_http(link):
-    u = urllib.parse.urlparse(link)
-    ob = {"type": "http", "tag": _tag(urllib.parse.unquote(u.fragment), u.hostname, u.port),
-          "server": u.hostname, "server_port": u.port or (443 if u.scheme == "https" else 80)}
-    if u.username:
-        ob["username"] = urllib.parse.unquote(u.username)
-    if u.password:
-        ob["password"] = urllib.parse.unquote(u.password)
-    if u.scheme == "https":
-        ob["tls"] = _tls_block(u.hostname)
-    return ob
+    return _sb_control.apply(modify)
 
 # ── 故障切换组 (urltest) ──
 def add_group(name, members):
@@ -1026,46 +789,21 @@ def start_update():
     except Exception:  # noqa: BLE001
         return False
 
-# ── 单条规则增删 ──
+# ── 单条规则增删：Bot 与 PWA 共用 GatewayService ──
 def add_rule(domain, target):
-    domain = domain.strip().lstrip(".").lower()
-    if not re.match(r"^[a-z0-9.-]+$", domain):
-        return False, "域名格式不对"
-    if target in ("direct", "直连"):
-        _write_direct(_read_direct() + [domain]); return True, f"已把 {domain} 设为直连"
-    c = load()
-    if target not in exit_tags(c):
-        return False, f"出口 {target} 不存在; 可选: {', '.join(exit_tags(c))} 或 direct"
-
-    def mod(cc):
-        for r in cc["route"]["rules"]:
-            if r.get("outbound") == target and "rule_set" not in r:
-                r.setdefault("domain_suffix", [])
-                if domain not in r["domain_suffix"]:
-                    r["domain_suffix"].append(domain)
-                return
-        idx = 1 if cc["route"]["rules"] and cc["route"]["rules"][0].get("action") == "reject" else 0
-        cc["route"]["rules"].insert(idx, {"domain_suffix": [domain], "outbound": target})
-    ok, msg = apply_sb(mod)
-    return ok, (f"已把 {domain} → {target}" if ok else msg)
+    target = "direct" if target == "直连" else target
+    try:
+        result = _gateway.set_rule(domain, target)
+        return True, f"已把 {result['domain']} → {result['target']}"
+    except ServiceError as error:
+        return False, str(error)
 
 def del_rule(domain):
-    domain = domain.strip().lstrip(".").lower(); removed = []
-    c = load()
-    if any(domain in r.get(k, []) for r in c["route"]["rules"] for k in ("domain_suffix", "domain")):
-        def mod(cc):
-            for r in cc["route"]["rules"]:
-                for k in ("domain_suffix", "domain"):
-                    if domain in r.get(k, []):
-                        r[k] = [d for d in r[k] if d != domain]
-            cc["route"]["rules"] = [r for r in cc["route"]["rules"]
-                                    if r.get("action") or "outbound" not in r or r.get("rule_set")
-                                    or r.get("domain_suffix") or r.get("domain")
-                                    or r.get("domain_keyword") or r.get("ip_cidr")]
-        apply_sb(mod); removed.append("出口规则")
-    if domain in _read_direct():
-        _write_direct([d for d in _read_direct() if d != domain]); removed.append("直连表")
-    return (bool(removed), f"已删除 {domain} ({'+'.join(removed)})" if removed else f"未找到含 {domain} 的规则")
+    try:
+        result = _gateway.remove_rule(domain)
+        return True, f"已删除 {result['deleted']}"
+    except ServiceError as error:
+        return False, str(error)
 
 def deletable_domains():
     """可删的单域名规则: [(域名, 显示文字)]。含各出口的 domain(_suffix) 与自定义直连表。"""
@@ -1340,6 +1078,7 @@ def set_dot_domain(domain):
     except Exception as e:  # noqa: BLE001
         return False, f"证书已签发但部署失败: {e}"
     sh(["systemctl", "restart", "mosdns"])
+    sh(["systemctl", "restart", "pdg-admin"])
     global _DOT_HOST
     _DOT_HOST = None  # 让 _dot_host() 重新读新证书 CN
     return True, (f"✅ DoT 域名已设为 <b>{domain}</b>\n"
@@ -1505,13 +1244,48 @@ def _server_ip():
         pass
     return "?"
 
+
+def _admin_url():
+    try:
+        token = open(ADMIN_TOKEN_FILE, encoding="utf-8").read().strip()
+    except OSError:
+        return ""
+    return f"https://{_dot_host()}:9443/#token={urllib.parse.quote(token, safe='')}" if len(token) >= 32 else ""
+
+
+def _mask_host(host):
+    """出口预览只显示可辨认的脱敏地址，不回显凭据。"""
+    host = str(host or "?")
+    if re.match(r"^\d+\.\d+\.\d+\.\d+$", host):
+        parts = host.split(".")
+        return f"{parts[0]}.*.*.{parts[-1]}"
+    parts = host.split(".")
+    if len(parts) >= 2:
+        return parts[0][:3] + "***." + parts[-1]
+    return host[:3] + "***"
+
+
+def outbound_preview(ob):
+    current = load()
+    replacing = any(item.get("tag") == ob.get("tag") for item in current.get("outbounds", []))
+    tls = "开启" if ob.get("tls", {}).get("enabled") else "关闭"
+    warning = "\n⚠️ 同名出口已存在，确认后将替换。" if replacing else ""
+    return ("📤 <b>确认添加出口</b>\n\n"
+            f"名称: <b>{_esc(str(ob.get('tag', '?')))}</b>\n"
+            f"协议: <code>{_esc(str(ob.get('type', '?')))}</code>\n"
+            f"地址: <code>{_esc(_mask_host(ob.get('server')))}:{ob.get('server_port', '?')}</code>\n"
+            f"TLS: {tls}{warning}\n\n"
+            "不会在消息中显示密码、UUID 或密钥。")
+
+
 def _groups_desc(c):
     g = [o for o in c["outbounds"] if o.get("type") == "urltest"]
     return "\n".join(f"🔀 故障组 <b>{o['tag']}</b>: {' › '.join(o.get('outbounds', []))}" for o in g)
 
 def status_text():
-    _st = sh(["systemctl", "is-active", "mosdns", "sing-box", "pdg-bot"]).stdout.split()
-    _states = dict(zip(["mosdns", "sing-box", "pdg-bot"], _st + ["?", "?", "?"]))
+    names = ["mosdns", "sing-box", "pdg-bot", "pdg-admin"]
+    _st = sh(["systemctl", "is-active", *names]).stdout.split()
+    _states = dict(zip(names, _st + ["?"] * len(names)))
     def dot(s):
         return "🟢" if _states.get(s) == "active" else "🔴"
     c = load(); exits = exit_tags(c)
@@ -1522,7 +1296,8 @@ def status_text():
     return ("🖥 <b>PrivDNS Gateway</b>\n\n"
             f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
             f"{dot('sing-box')} sing-box（流量出口）\n"
-            f"{dot('pdg-bot')} pdg-bot（管理）\n\n"
+            f"{dot('pdg-bot')} pdg-bot（快捷管理）\n"
+            f"{dot('pdg-admin')} pdg-admin（Web 管理端）\n\n"
             f"📡 DoT: <code>{_dot_host()}:853</code>（Android 私密DNS / iOS 描述文件）\n"
             f"🌐 IP: <code>{_server_ip()}</code>\n"
             f"📤 出口({len(exits)}): {', '.join(exits)}\n"
@@ -1575,7 +1350,8 @@ def kb_pick_named(prefix, items, back=BACK):
 # ── 回调 (原地编辑) ──
 def handle_cb(chat, mid, data):
     if data in ("menu", "status") or data.startswith("nav:"):
-        state.pop(chat, None); del_sel.pop(chat, None)   # 返回/切页 = 放弃进行中的输入流程和勾选, 免得下一条文字被旧状态误吃
+        # 返回/切页 = 放弃待输入、删除勾选和未确认出口，避免旧流程误吃下一条消息。
+        state.pop(chat, None); del_sel.pop(chat, None); pending_outbound.pop(chat, None)
     if data in ("menu", "status"):
         edit(chat, mid, status_text(), MENU); return
     if data.startswith("nav:"):
@@ -1611,8 +1387,25 @@ def handle_cb(chat, mid, data):
     if data == "rules":
         edit(chat, mid, rules_text(), RULE_BACK); return
     if data == "add_exit":
-        state[chat] = "add_exit"
-        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n/cancel 取消。", EXIT_BACK); return
+        pending_outbound.pop(chat, None); state[chat] = "add_exit"
+        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n解析后会先显示脱敏预览，确认才应用。/cancel 取消。", EXIT_BACK); return
+    if data == "addxok":
+        ob = pending_outbound.pop(chat, None)
+        if not ob:
+            edit(chat, mid, "添加确认已过期，请重新粘贴节点链接。", EXIT_BACK); return
+        edit(chat, mid, "正在校验并应用出口…", EXIT_BACK)
+        try:
+            _gateway.add_outbound(ob); ok, msg = True, ""
+        except ServiceError as error:
+            ok, msg = False, str(error); pending_outbound[chat] = ob
+        edit(chat, mid, (f"✅ 已添加出口 <b>{_esc(ob['tag'])}</b> ({ob['type']})" if ok else "❌ " + msg),
+             EXIT_BACK if ok else {"inline_keyboard": [
+                 [{"text": "🔁 重试应用", "callback_data": "addxok"},
+                  {"text": "取消", "callback_data": "addxcancel"}],
+                 *_back_rows(EXIT_BACK)]}); return
+    if data == "addxcancel":
+        pending_outbound.pop(chat, None); state.pop(chat, None)
+        edit(chat, mid, "已取消添加出口。", EXIT_BACK); return
     if data == "add_grp":
         state[chat] = "add_group"
         edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(自动选最快/坏了自动切)。\n"
@@ -1693,6 +1486,14 @@ def handle_cb(chat, mid, data):
         cur = _rs_meta().get(name, {}).get("label") or name
         edit(chat, mid, f"发规则集 <code>{name}</code> 的新名称(显示用, 如 <b>币安</b> / <b>OpenAI</b>)。\n"
              f"当前: {cur}\n发「-」清除自定义名。/cancel 取消。", RULE_BACK); return
+    if data == "admin":
+        url = _admin_url()
+        if not url:
+            edit(chat, mid, "管理令牌尚未生成。请在服务器运行 <code>sudo pdg admin</code>。", BACK); return
+        edit(chat, mid, "🖥 <b>PrivDNS 管理面板</b>\n仅在手机走内网卡、能访问网关时打开。令牌只保存在链接片段中，不会发送给 Web 服务器日志。",
+             {"inline_keyboard": [[{"text": "打开管理面板", "url": url}],
+                                  [{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+                                  [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data == "tgexit":
         c = load(); cur = _tg_exit(c)
         rows = [[{"text": ("✓ " if t == cur else "") + t, "callback_data": "tgx:" + t}] for t in exit_tags(c)]
@@ -1795,36 +1596,65 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, (f"✅ geosite 已更新; 规则集刷新 {n} 个" if r.returncode == 0
                          else "geosite 更新失败:\n" + (r.stdout + r.stderr)[-300:]), OPS_BACK); return
     if data.startswith("delx:"):
-        tag = data[5:]
-        def mod(c):
-            c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != tag]
-            for o in c["outbounds"]:
-                if o.get("type") == "urltest":
-                    o["outbounds"] = [m for m in o.get("outbounds", []) if m != tag]
-            c["outbounds"] = [o for o in c["outbounds"]
-                              if not (o.get("type") == "urltest" and not o.get("outbounds"))]
-            live = {o["tag"] for o in c["outbounds"]}
-            for r in c["route"]["rules"]:
-                if r.get("outbound") and r["outbound"] not in live:
-                    r["outbound"] = c["route"].get("final", "hk")
-            if c["route"].get("final") not in live:
-                c["route"]["final"] = next((t for t in exit_tags(c)), "direct")
-        ok, msg = apply_sb(mod)
-        edit(chat, mid, f"✅ 已删除 {tag}" if ok else msg, EXIT_BACK); return
+        tag = data[5:]; c = load()
+        if tag not in deletable_tags(c):
+            edit(chat, mid, "出口已不存在，请刷新列表。", EXIT_BACK); return
+        impact = outbound_impact(c, tag)
+        details = []
+        if impact["final"]:
+            details.append("• 当前默认出口将自动切换")
+        if impact["groups"]:
+            details.append("• 故障组会移除它: " + ", ".join(impact["groups"]))
+        if impact["rules"]:
+            details.append(f"• {len(impact['rules'])} 条分流引用将跟随默认出口")
+        if impact["telegram"]:
+            details.append("• Telegram 专用出口将跟随默认出口")
+        if not details:
+            details.append("• 没有发现配置引用")
+        edit(chat, mid, f"⚠️ <b>确认删除出口 {_esc(tag)}</b>\n\n" + "\n".join(details),
+             {"inline_keyboard": [
+                 [{"text": "🗑 确认删除", "callback_data": "delxok:" + tag}],
+                 [{"text": "取消", "callback_data": "del_exit"}],
+                 *_back_rows(EXIT_BACK)]}); return
+    if data.startswith("delxok:"):
+        tag = data[7:]
+        if tag not in deletable_tags(load()):
+            edit(chat, mid, "出口已不存在，请刷新列表。", EXIT_BACK); return
+        edit(chat, mid, "正在校验删除后的配置…", EXIT_BACK)
+        try:
+            _gateway.remove_exit(tag); ok, msg = True, ""
+        except ServiceError as error:
+            ok, msg = False, str(error)
+        edit(chat, mid, f"✅ 已删除 {_esc(tag)}，相关引用已安全迁移" if ok else "❌ " + msg, EXIT_BACK); return
     if data.startswith("fin:"):
         tag = data[4:]
-        ok, msg = apply_sb(lambda c: c["route"].__setitem__("final", tag))
+        try:
+            _gateway.set_final(tag); ok, msg = True, ""
+        except ServiceError as error:
+            ok, msg = False, str(error)
         edit(chat, mid, f"✅ 默认出口 → {tag}" if ok else msg, EXIT_BACK); return
     if data.startswith("delrs:"):
         ok, msg = del_ruleset(data[6:]); edit(chat, mid, ("✅ " if ok else "") + msg, RULE_BACK); return
 
 # ── 文本 ──
+def _input_result(chat, ok, message):
+    """成功才结束输入态；失败允许直接修正后重试。"""
+    if ok:
+        state.pop(chat, None)
+        prefix = "" if message.startswith("✅") else "✅ "
+        send_plain(chat, prefix + message)
+    else:
+        send_plain(chat, "❌ " + message + "\n\n仍在当前操作，可重新输入，或 /cancel 取消。")
+
+
 def handle_text(chat, text):
     text = text.strip()
     if text == "/cancel":
-        state.pop(chat, None); send_plain(chat, "已取消"); return
+        state.pop(chat, None); del_sel.pop(chat, None); pending_outbound.pop(chat, None)
+        send_plain(chat, "已取消"); return
     if text in ("/start", "/menu", "/status"):
-        state.pop(chat, None); send(chat, status_text()); return
+        state.pop(chat, None); del_sel.pop(chat, None); pending_outbound.pop(chat, None)
+        send(chat, status_text()); return
     if text.startswith("/"):
         cmd = text.split()[0]
         if cmd == "/test":
@@ -1838,7 +1668,8 @@ def handle_text(chat, text):
         if cmd == "/rules":
             send(chat, rules_text(), BACK); return
         if cmd == "/addexit":
-            state[chat] = "add_exit"; send(chat, "发节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行。/cancel 取消。", BACK); return
+            pending_outbound.pop(chat, None); state[chat] = "add_exit"
+            send(chat, "发节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行。解析后确认才应用。/cancel 取消。", BACK); return
         if cmd == "/group":
             state[chat] = "add_group"; send(chat, "发「<b>组名 出口1 出口2 …</b>」建故障切换组。/cancel 取消。", BACK); return
         if cmd == "/addrule":
@@ -1855,6 +1686,12 @@ def handle_text(chat, text):
         if cmd == "/delrs":
             m = _rs_meta()
             send(chat, "选择删除的规则集：" if m else "无规则集", kb_pick("delrs", list(m.keys())) if m else BACK); return
+        if cmd == "/admin":
+            url = _admin_url()
+            if not url:
+                send_plain(chat, "管理令牌尚未生成，请在服务器运行 sudo pdg admin。"); return
+            send(chat, "管理面板仅在内网卡网络下可达。", {"inline_keyboard": [
+                [{"text": "打开管理面板", "url": url}], *_back_rows(BACK)]}); return
         if cmd == "/ios":
             try:
                 send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")
@@ -1877,49 +1714,50 @@ def handle_text(chat, text):
             send_plain(chat, "更新中…"); r = sh(["/bin/bash", UPDATE_SCRIPT]); n = refresh_rulesets()
             send_plain(chat, f"✅ 完成，规则集刷新 {n} 个" if r.returncode == 0 else "更新失败"); return
         send_plain(chat, "未识别命令，发 /start 打开菜单"); return
-    act = state.pop(chat, None) or ""   # 无待输入时为 "", 避免下面 act.startswith(...) 在 None 上崩
+    act = state.get(chat, "")
     if act == "add_exit":
         try:
             ob = parse_link(text)
-            def mod(c):
-                c["outbounds"] = [o for o in c["outbounds"] if o.get("tag") != ob["tag"]]
-                c["outbounds"].append(ob)
-            ok, msg = apply_sb(mod)
-            send_plain(chat, f"✅ 已添加出口 <b>{ob['tag']}</b> ({ob['type']} {ob['server']}:{ob['server_port']})" if ok else msg)
+            pending_outbound[chat] = ob; state.pop(chat, None)
+            send(chat, outbound_preview(ob), {"inline_keyboard": [
+                [{"text": "✅ 确认应用", "callback_data": "addxok"},
+                 {"text": "取消", "callback_data": "addxcancel"}],
+                *_back_rows(EXIT_BACK)]})
         except Exception as e:  # noqa: BLE001
-            send_plain(chat, f"解析失败: {e}")
+            _input_result(chat, False, f"解析失败: {e}")
         return
     if act == "add_group":
         p = text.split()
         if len(p) < 3:
-            send_plain(chat, "格式: 组名 出口1 出口2 …(至少2个出口)"); return
-        ok, msg = add_group(p[0], p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
+            _input_result(chat, False, "格式: 组名 出口1 出口2 …(至少2个出口)"); return
+        ok, msg = add_group(p[0], p[1:]); _input_result(chat, ok, msg); return
     if act == "order_exit":
-        ok, msg = reorder_exits(text.replace(",", " ").split()); send_plain(chat, msg if ok else ("❌ " + msg)); return
+        ok, msg = reorder_exits(text.replace(",", " ").split()); _input_result(chat, ok, msg); return
     if act.startswith("edit_grp:"):
         ok, msg = add_group(act.split(":", 1)[1], text.replace(",", " ").split())
-        send_plain(chat, msg if ok else ("❌ " + msg)); return
+        _input_result(chat, ok, msg); return
     if act.startswith("rename_exit:"):
         ok, msg = rename_exit(act.split(":", 1)[1], text)
-        send_plain(chat, msg if ok else ("❌ " + msg)); return
+        _input_result(chat, ok, msg); return
     if act == "add_rule":
         p = text.split()
-        send_plain(chat, "格式: 域名 出口" if len(p) != 2 else (lambda r: ("✅ " if r[0] else "") + r[1])(add_rule(p[0], p[1])))
-        return
+        if len(p) != 2:
+            _input_result(chat, False, "格式: 域名 出口"); return
+        ok, msg = add_rule(p[0], p[1]); _input_result(chat, ok, msg); return
     if act == "del_rule":
-        ok, msg = del_rule(text); send_plain(chat, ("✅ " if ok else "") + msg); return
+        ok, msg = del_rule(text); _input_result(chat, ok, msg); return
     if act == "test_dom":
-        send_plain(chat, test_domain(text)); return
+        state.pop(chat, None); send_plain(chat, test_domain(text)); return
     if act == "add_rs":
         p = text.split()
         if len(p) < 2:
-            send_plain(chat, "格式: 规则集URL 出口 [名称]"); return
+            _input_result(chat, False, "格式: 规则集URL 出口 [名称]"); return
         send_plain(chat, "正在下载规则集…")
-        ok, msg = add_ruleset(p[0], p[1], " ".join(p[2:])); send_plain(chat, ("✅ " if ok else "") + msg); return
+        ok, msg = add_ruleset(p[0], p[1], " ".join(p[2:])); _input_result(chat, ok, msg); return
     if act.startswith("rs_label:"):
         name = act.split(":", 1)[1]
         ok, msg = set_ruleset_label(name, "" if text.strip() == "-" else text)
-        send_plain(chat, msg if ok else ("❌ " + msg)); return
+        _input_result(chat, ok, msg); return
     if act == "ios_ssid":
         ssids = [] if text.strip() == "-" else [l.strip()[:32] for l in text.splitlines() if l.strip()][:8]
         try:
@@ -1927,18 +1765,19 @@ def handle_text(chat, text):
                           f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
                           + (("强制直连 Wi-Fi: " + ", ".join(ssids) + "\n") if ssids else "")
                           + "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。")
+            state.pop(chat, None)
             send_plain(chat, "✅ 已生成" + (f", {len(ssids)} 个 Wi-Fi 设为强制直连" if ssids else ""))
         except Exception as e:  # noqa: BLE001
-            send_plain(chat, f"生成失败: {e}")
+            _input_result(chat, False, f"生成失败: {e}")
         return
     if act == "set_dns":
         p = text.split()
         if len(p) < 2:
-            send_plain(chat, "格式: remote|local 地址1 [地址2 …]"); return
-        ok, msg = set_mosdns_upstream(p[0].lower(), p[1:]); send_plain(chat, msg if ok else ("❌ " + msg)); return
+            _input_result(chat, False, "格式: remote|local 地址1 [地址2 …]"); return
+        ok, msg = set_mosdns_upstream(p[0].lower(), p[1:]); _input_result(chat, ok, msg); return
     if act == "set_dot":
         send_plain(chat, "正在校验域名并签发证书(约 30-60 秒, 期间代理短暂中断)…")
-        ok, msg = set_dot_domain(text); send_plain(chat, msg if ok else ("❌ " + msg)); return
+        ok, msg = set_dot_domain(text); _input_result(chat, ok, msg); return
     if act == "restore":
         send_plain(chat, "请把备份 <code>.tar.gz</code> 作为「文件」发来, 而不是文字。/cancel 取消。"); state[chat] = "restore"; return
     # 裸发一个像域名的文本: 当作想设 DoT 域名, 给一键按钮 (省得先点菜单进状态)
@@ -1962,7 +1801,10 @@ def handle_document(chat, doc):
         ok, msg = restore_from(data)
     except Exception as e:  # noqa: BLE001
         ok, msg = False, f"恢复失败: {e}"
-    send_plain(chat, ("✅ " if ok else "❌ ") + msg)
+    if not ok:
+        state[chat] = "restore"
+    send_plain(chat, ("✅ " if ok else "❌ ") + msg
+               + ("\n仍可重新发送备份文件，或 /cancel 取消。" if not ok else ""))
 
 def main():
     if not TOKEN:

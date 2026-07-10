@@ -83,4 +83,11 @@ plugins:
     args: {entry: main_sequence, listen: "0.0.0.0:53"}
   - tag: dot_server
     type: tcp_server
-    args: {entry: main_sequence, listen: "0.0.0.0:853", cert: "__CERT_DIR__/fullchain.pem", key: "__CERT_DIR__/privkey.pem"}
+    # idle_timeout: mosdns 默认 10s 空闲即关连接, 设备休眠/待机期间无查询会被断开, 醒来首包要重连。
+    # 调大到 1800s(30min), 配合内核 tcp_keepalive_time=60 维持基站专线 NAT 表项, 长连不断。
+    args:
+      entry: main_sequence
+      listen: "0.0.0.0:853"
+      cert: "__CERT_DIR__/fullchain.pem"
+      key: "__CERT_DIR__/privkey.pem"
+      idle_timeout: 1800

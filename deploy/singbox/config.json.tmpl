@@ -17,26 +17,26 @@
     },
     {
       "type": "direct", "tag": "in-gms-5228", "network": "tcp",
-      "listen": "0.0.0.0", "listen_port": 5228,
-      "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms"
+      "listen": "0.0.0.0", "listen_port": 5228
     },
     {
       "type": "direct", "tag": "in-gms-5229", "network": "tcp",
-      "listen": "0.0.0.0", "listen_port": 5229,
-      "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms"
+      "listen": "0.0.0.0", "listen_port": 5229
     },
     {
       "type": "direct", "tag": "in-gms-5230", "network": "tcp",
-      "listen": "0.0.0.0", "listen_port": 5230,
-      "sniff": true, "sniff_override_destination": true, "sniff_timeout": "300ms"
+      "listen": "0.0.0.0", "listen_port": 5230
     },
     { "type": "mixed", "tag": "tg-proxy", "listen": "0.0.0.0", "listen_port": 8445 }
   ],
   "outbounds": [
-    { "type": "direct", "tag": "jp" }
+    { "type": "direct", "tag": "jp" },
+    { "type": "direct", "tag": "gms-mtalk",
+      "override_address": "mtalk.google.com", "domain_strategy": "prefer_ipv4" }
   ],
   "route": {
     "rules": [
+      { "inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"], "outbound": "gms-mtalk" },
       { "ip_cidr": ["__SERVER_IP__/32", "127.0.0.0/8"], "action": "reject" }
     ],
     "final": "jp"

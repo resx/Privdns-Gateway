@@ -3,7 +3,7 @@
 #   pdg [menu] | status | update | token | restart | log [n] | uninstall [--purge]
 # 设计: 生命周期(装/更新/卸载/token/状态/日志)走这里; 出口/分流/DNS上游 走 Telegram bot。
 set -uo pipefail
-REPO_URL="https://github.com/misaka-cpu/privdns-gateway.git"
+REPO_URL="https://github.com/resx/Privdns-Gateway.git"
 REPO_DIR="/opt/privdns-gateway"
 SVC="/etc/systemd/system/pdg-bot.service"
 ENVD="/etc/privdns-gateway"
@@ -34,13 +34,13 @@ pdg_fetch_release_tags(){
 
 cmd_status(){
   c_g "== 服务 =="
-  for s in mosdns sing-box pdg-bot pdg-probe81; do
+  for s in mosdns sing-box pdg-bot pdg-admin pdg-probe81; do
     printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports
-  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090)\b' | sed 's/^://' | sort -u | sed 's/^9090$/9090(local clash_api)/' | tr '\n' ' ')
+  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090|9443)\b' | sed 's/^://' | sort -u | sed 's/^9090$/9090(local clash_api)/' | sed 's/^9443$/9443(admin HTTPS)/' | tr '\n' ' ')
   echo "  监听端口     $ports"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
 }
@@ -241,17 +241,25 @@ PY
   fi
 }
 
-# 老装迁移: sing-box 补 5228-5230 direct 嗅探入站(GMS/FCM 推送端口 mtalk.google.com)。幂等。
-# 不补则被 DNS 劫持的 mtalk 只能靠客户端回落 443, 回落慢的手机表现为"Google 服务连不上"。
+# 老装迁移: sing-box 补 5228-5230 direct 入站(GMS/FCM 推送端口 mtalk.google.com) + gms-mtalk 改写出站。
+# ⚠️ mtalk 是私有 mcs 二进制协议(非 TLS/HTTP), 无 SNI/无 Host → sniff 拿不到域名、嗅不到。
+#    入站不设 sniff; 流量靠 route.rules 按 inbound 口钉到 gms-mtalk 出站(override_address 改写目的到
+#    mtalk.google.com, 保留原端口), 该规则必须排在 SERVER_IP reject 自环规则之前, 否则连接进来即被杀。
+#    网关本机解析 mtalk.google.com 走真实上游(127.0.0.1 非内网卡源, 不进劫持分支), 不会自环。
 # check 不过/起不来自动还原。$1 可指定文件(供测试), 默认 /etc/sing-box/config.json。
 # shellcheck disable=SC2120  # $1 仅测试注入, 生产调用不传参
 migrate_singbox_gms(){
   local f="${1:-/etc/sing-box/config.json}"
   [[ -f "$f" ]] || return 0
-  grep -q '"listen_port": 5228' "$f" && return 0              # 已有 → 幂等退出
-  grep -q '"sniff_override_destination"' "$f" || return 0     # 不是本项目形态的配置 → 不动
+  grep -q '"listen_port": 5228' "$f" || grep -q '"sniff_override_destination"' "$f" || return 0  # 不是本项目形态的配置 → 不动
   command -v sing-box >/dev/null || return 0
-  c_g "检测到 sing-box 缺 GMS 推送入站 → 补 5228-5230 嗅探入站…"
+  local need_migrate=0
+  grep -q '"listen_port": 5228' "$f" || need_migrate=1                     # 缺 5228-5230 入站
+  grep -q '"inbound":.*in-gms-5228' "$f" || need_migrate=1                   # 缺 inbound 口路由(旧 sniff 形态或无路由)
+  grep -q '"gms-mtalk"' "$f" || need_migrate=1                              # 缺 gms-mtalk 出站
+  grep -qE '"in-gms-5228".*"sniff"|sniff.*in-gms-5228' "$f" && need_migrate=1  # 仍是旧 sniff 形态 → 升级
+  [[ "$need_migrate" == 0 ]] && return 0                                     # 全齐且为新形态 → 幂等退出
+  c_g "检测到 sing-box GMS 推送配置需更新 → 补 5228-5230 入站 + gms-mtalk 改写出站…"
   local bak; bak="$f.pregms.$(date +%s)"
   if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
     c_y "  备份失败(磁盘满?), 中止、不动现网。"; rm -f "$bak" 2>/dev/null; return 0
@@ -260,14 +268,26 @@ migrate_singbox_gms(){
 import json, sys
 p = sys.argv[1]
 c = json.load(open(p))
-ins = c.get("inbounds", [])
+ins = c.setdefault("inbounds", [])
+outs = c.setdefault("outbounds", [])
+rules = c.setdefault("route", {}).setdefault("rules", [])
+# 1) 清掉旧的 GMS 入站(无论 sniff 与否), 重新插三个无 sniff 的入站(在 :80 之后)
+ins = [i for i in ins if i.get("listen_port") not in (5228, 5229, 5230)]
 idx = next((n + 1 for n, i in enumerate(ins) if i.get("listen_port") == 80),
            next((n + 1 for n, i in enumerate(ins) if i.get("listen_port") == 443), len(ins)))
 for off, port in enumerate((5228, 5229, 5230)):
     ins.insert(idx + off, {"type": "direct", "tag": "in-gms-%d" % port, "network": "tcp",
-                           "listen": "0.0.0.0", "listen_port": port,
-                           "sniff": True, "sniff_override_destination": True, "sniff_timeout": "300ms"})
+                           "listen": "0.0.0.0", "listen_port": port})
 c["inbounds"] = ins
+# 2) 加 gms-mtalk 出站(去重)
+if not any(o.get("tag") == "gms-mtalk" for o in outs):
+    outs.append({"type": "direct", "tag": "gms-mtalk",
+                 "override_address": "mtalk.google.com", "domain_strategy": "prefer_ipv4"})
+c["outbounds"] = outs
+# 3) route.rules 首条按 inbound 口钉到 gms-mtalk(必须在 SERVER_IP reject 自环规则之前)
+rules = [r for r in rules if not (r.get("inbound") == ["in-gms-5228", "in-gms-5229", "in-gms-5230"])]
+rules.insert(0, {"inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"], "outbound": "gms-mtalk"})
+c["route"]["rules"] = rules
 json.dump(c, open(p, "w"), ensure_ascii=False, indent=2)
 PY
   then c_y "  生成失败 → 还原。"; cp -a "$bak" "$f"; return 0; fi
@@ -276,7 +296,7 @@ PY
   fi
   systemctl reset-failed sing-box 2>/dev/null; systemctl restart sing-box 2>/dev/null; sleep 2
   if [[ "$(systemctl is-active sing-box 2>/dev/null)" == active ]]; then
-    c_g "  ✅ 已补 GMS 入站(5228-5230)。"
+    c_g "  ✅ 已更新 GMS 推送配置(5228-5230 入站 + gms-mtalk 改写出站)。"
   else
     c_y "  ⚠️ sing-box 重启失败 → 还原。"; cp -a "$bak" "$f"
     systemctl reset-failed sing-box 2>/dev/null; systemctl restart sing-box 2>/dev/null
@@ -315,6 +335,40 @@ migrate_fw_gms(){
   fi
 }
 
+# 老装迁移: 给内网管理端放行 9443/tcp。只追加端口,备份和 nft 校验失败均不动现网。
+# shellcheck disable=SC2120  # $1 仅测试注入
+migrate_fw_admin(){
+  local f="${1:-/etc/nftables.conf}" bak
+  [[ -f "$f" ]] || return 0
+  grep -q 'table inet pdg' "$f" || return 0
+  grep -qE 'tcp dport [{][^}]*9443' "$f" && return 0
+  if ! grep -qE 'ip saddr [0-9./]+ tcp dport [{][^}]*853[^}]*8445[^}]*[}] accept' "$f"; then
+    c_y "防火墙端口集非项目形态,未自动放行管理端。请手动给内网卡段放行 9443/tcp。"
+    return 0
+  fi
+  bak="$f.preadmin.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "管理端防火墙迁移备份失败,中止。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  sed -E -i 's#(ip saddr [0-9./]+ tcp dport [{][^}]*8445)([[:space:]]*[}] accept)#\1, 9443\2#' "$f"
+  if ! grep -qE 'tcp dport [{][^}]*9443' "$f" || ! nft -c -f "$f" >/dev/null 2>&1; then
+    c_y "管理端防火墙规则校验失败,已还原。"; cp -a "$bak" "$f"; return 0
+  fi
+  if nft -f "$f" 2>/dev/null; then
+    c_g "  ✅ 已给内网卡段放行管理端 9443/tcp。"
+  else
+    cp -a "$bak" "$f"; c_y "管理端防火墙加载失败,已还原。"
+  fi
+}
+
+ensure_admin_token(){
+  install -d -m700 /etc/privdns-gateway
+  if [[ ! -s /etc/privdns-gateway/admin.token ]]; then
+    ( umask 077; openssl rand -hex 32 > /etc/privdns-gateway/admin.token )
+  fi
+  chmod 600 /etc/privdns-gateway/admin.token
+}
+
 SNAP_DIR="/var/lib/privdns-gateway/backups"
 
 cmd_snapshot(){
@@ -323,8 +377,8 @@ cmd_snapshot(){
   install -d -m700 "$d"
   # 整机配置 + 防火墙 + bot.env(含 token)+ service(相对 / 打包, 回滚直接 -C / 解开)
   tar czf "$d/snap.tar.gz" -C / \
-    etc/mosdns etc/sing-box opt/pdg-bot etc/privdns-gateway \
-    etc/nftables.conf etc/systemd/system/pdg-bot.service 2>/dev/null
+    etc/mosdns etc/sing-box opt/pdg-bot opt/pdg-admin etc/privdns-gateway \
+    etc/nftables.conf etc/systemd/system/pdg-bot.service etc/systemd/system/pdg-admin.service 2>/dev/null
   chmod 600 "$d/snap.tar.gz"
   echo "✅ 快照: $d/snap.tar.gz"
   ls -1dt "$SNAP_DIR"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf   # 只留最近 10 份
@@ -354,7 +408,7 @@ cmd_rollback(){
   tar xzf "$f" -C /
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
-  systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null || true
+  systemctl restart mosdns sing-box pdg-bot pdg-admin pdg-probe81 2>/dev/null || true
   echo "✅ 已回滚并重启服务"
 }
 
@@ -383,7 +437,15 @@ cmd_update(){
   c_g "→ 已切到发布 $tgt"
   c_g "刷新代码(配置/出口/token/证书均不动)…"
   install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py           /opt/pdg-bot/bot.py
-  install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/pdg_control.py        /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/pdg_links.py          /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/bot/pdg_service.py        /opt/pdg-bot/
+  install -d /opt/pdg-admin/web
+  install -m755 "$REPO_DIR"/deploy/admin/pdg-admin.py        /opt/pdg-admin/
+  rm -rf /opt/pdg-admin/web; install -d /opt/pdg-admin/web
+  cp -a "$REPO_DIR"/deploy/admin/web/.                       /opt/pdg-admin/web/
+  install -m644 "$REPO_DIR"/deploy/admin/pdg-admin.service   /etc/systemd/system/
+  install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
@@ -401,12 +463,14 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/pdg.sh               /usr/local/bin/pdg
   migrate_botenv            # 老装: token 从 unit 迁到 bot.env
   migrate_firewall_to_pdg   # 老装: 防火墙 inet filter → 独立表 inet pdg(否则证书续期开不了 80)
-  migrate_singbox_gms       # 老装: sing-box 补 GMS 推送入站(5228-5230 嗅探分流)
-  migrate_fw_gms            # 老装: 防火墙内网放行集补 5228-5230(配合上面入站)
+  migrate_singbox_gms       # 老装: sing-box 补 GMS 推送入站和 mtalk 路由
+  migrate_fw_gms            # 老装: 防火墙内网放行集补 5228-5230
+  migrate_fw_admin          # 老装: 防火墙内网放行管理端 9443
+  ensure_admin_token
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
   c_g "校验新版本…"
-  if ! python3 -m py_compile /opt/pdg-bot/*.py 2>/dev/null; then
+  if ! python3 -m py_compile /opt/pdg-bot/*.py /opt/pdg-admin/pdg-admin.py 2>/dev/null; then
     c_y "Python 语法错误, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
   if ! sing-box check -c /etc/sing-box/config.json >/dev/null 2>&1; then
@@ -416,8 +480,8 @@ cmd_update(){
     c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
   fi
   systemctl daemon-reload
-  systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true   # 老装升级时补上健康自检
-  systemctl restart pdg-bot pdg-probe81 2>/dev/null || true
+  systemctl enable --now pdg-health.timer pdg-admin >/dev/null 2>&1 || true
+  systemctl restart pdg-bot pdg-admin pdg-probe81 2>/dev/null || true
   sleep 2
 
   # token 是否已配置(未配则 pdg-bot 不在跑属正常, 不据此回滚)
@@ -425,6 +489,9 @@ cmd_update(){
   [[ -f "$ENVF" ]] && grep -qE '^PDG_BOT_TOKEN=.+' "$ENVF" && grep -qE '^PDG_BOT_ALLOWED=.+' "$ENVF" && token_set=1
   if [[ "$token_set" == 1 && "$(systemctl is-active pdg-bot 2>/dev/null)" != "active" ]]; then
     c_y "pdg-bot 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
+  fi
+  if [[ "$(systemctl is-active pdg-admin 2>/dev/null)" != "active" ]]; then
+    c_y "pdg-admin 更新后起不来, 回滚到更新前快照…"; cmd_rollback 0; return 1
   fi
 
   # doctor 自检: 有 fail 回滚, warn 仅提示 (未配 token 时把"服务: 未运行: pdg-bot"这单一项排除, 避免误判)
@@ -448,9 +515,30 @@ cmd_update(){
 
 cmd_token(){ need_root token; pdg-set-token; }   # 不 exec, 设完/取消都回菜单
 
-cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-probe81"; }
+cmd_admin(){
+  need_root admin; ensure_admin_token
+  local host token token_file=/etc/privdns-gateway/admin.token
+  if [[ "${1:-}" == "--rotate" ]]; then
+    local bak tmp
+    bak="$token_file.bak"; tmp="$token_file.new"
+    cp -a "$token_file" "$bak" || { echo "令牌备份失败"; return 1; }
+    ( umask 077; openssl rand -hex 32 > "$tmp" ) || { rm -f "$tmp" "$bak"; return 1; }
+    mv "$tmp" "$token_file"; chmod 600 "$token_file"
+    systemctl restart pdg-admin 2>/dev/null; sleep 1
+    if [[ "$(systemctl is-active pdg-admin 2>/dev/null)" != active ]]; then
+      cp -a "$bak" "$token_file"; systemctl restart pdg-admin 2>/dev/null
+      rm -f "$bak"; echo "管理服务重启失败,令牌已还原"; return 1
+    fi
+    rm -f "$bak"; echo "管理令牌已轮换,旧链接立即失效。"
+  fi
+  host=$(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo '?')
+  token=$(cat "$token_file")
+  echo "管理端(仅内网卡可达): https://${host}:9443/#token=${token}"
+}
 
-cmd_log(){ journalctl -u pdg-bot -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
+cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-admin pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-admin / pdg-probe81"; }
+
+cmd_log(){ journalctl -u pdg-bot -u pdg-admin -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
 
 cmd_traffic(){ command -v vnstat >/dev/null && vnstat || echo "vnstat 未装: sudo apt install -y vnstat && systemctl enable --now vnstat"; }
 
@@ -543,7 +631,8 @@ menu(){
     echo " 10) iOS 描述文件"
     echo " 11) 诊断报告 (脱敏)"
     echo " 12) 识别内网卡段"
-    echo " 13) 卸载"
+    echo " 13) 显示管理面板地址/令牌"
+    echo " 14) 卸载"
     echo "  0) 退出"
     echo "  下次打开本菜单命令: pdg"
     printf "选择: "
@@ -561,7 +650,8 @@ menu(){
       10) cmd_ios;;
       11) cmd_report;;
       12) cmd_detect_cidr;;
-      13) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
+      13) cmd_admin;;
+      14) read -rp "卸载: 留空取消 / yes 仅卸载 / purge 连配置一起删: " x
          case "$x" in yes) cmd_uninstall;; purge) cmd_uninstall --purge;; *) echo "已取消";; esac;;
       0|q) exit 0;;
       *) echo "无效选择";;
@@ -577,7 +667,7 @@ if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
     *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
-       migrate_singbox_gms || true; migrate_fw_gms || true ;;   # 管理类命令才迁移
+       migrate_singbox_gms || true; migrate_fw_gms || true; migrate_fw_admin || true ;;   # 管理类命令才迁移
   esac
 fi
 
@@ -590,6 +680,7 @@ case "${1:-menu}" in
   snapshot|snap) cmd_snapshot;;
   rollback)      shift || true; cmd_rollback "${1:-0}";;
   token)         cmd_token;;
+  admin)         shift || true; cmd_admin "${1:-}";;
   restart)       cmd_restart;;
   log|logs)      shift || true; cmd_log "${1:-40}";;
   traffic|tr)    cmd_traffic;;
@@ -597,5 +688,5 @@ case "${1:-menu}" in
   report)        shift || true; cmd_report "$@";;
   detect-cidr|cidr) shift || true; cmd_detect_cidr "${1:-}";;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|migrate-fw|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|admin [--rotate]|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|migrate-fw|uninstall [--purge]]";;
 esac

@@ -3,7 +3,7 @@
 # PrivDNS Gateway 一键安装 (Debian 12+ / Ubuntu 22+, 需 root)
 #   sudo ./install.sh
 # 非交互/自动化: 预置 PDG_* 环境变量 + PDG_NONINTERACTIVE=1 (见 docs/INSTALL.md)。
-#   PDG_SERVER_IP PDG_SSH_PORT PDG_INTERNAL_CIDR PDG_BOT_TOKEN PDG_ALLOWED PDG_DOT_DOMAIN
+#   PDG_SERVER_IP PDG_SSH_PORT PDG_INTERNAL_CIDR PDG_BOT_TOKEN PDG_ALLOWED PDG_DOT_DOMAIN PDG_ADMIN_TOKEN
 #   PDG_SKIP_CERT=1  跳过 certbot, 生成自签占位证书 (之后用 bot 补正式证书)
 # 做什么: 装 mosdns + sing-box(1.12) + 管理 bot + 防火墙 + DoT 证书。
 #   自动识别公网IP / 内网卡段; DNS(域名 A 记录) 那步留给你自己做; 落地出口装好后用 bot 加。
@@ -11,7 +11,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO_URL="https://github.com/misaka-cpu/privdns-gateway.git"
+REPO_URL="https://github.com/resx/Privdns-Gateway.git"
 CERT_DIR="/etc/mosdns/certs"
 NONINT="${PDG_NONINTERACTIVE:-}"
 # 二进制版本(MOSDNS_VER/SINGBOX_VER)+ 钉死 SHA256 来自 lib/versions.sh, 自举进仓库后 source(见下)
@@ -100,14 +100,14 @@ rollback(){
     return
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-probe81 mosdns sing-box \
+  systemctl disable --now pdg-bot pdg-admin pdg-probe81 mosdns sing-box \
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
+  rm -f /etc/systemd/system/{pdg-bot,pdg-admin,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
         /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
         /etc/systemd/system/journald.conf.d/50-pdg.conf
   systemctl daemon-reload 2>/dev/null
   nft delete table inet pdg 2>/dev/null
-  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /etc/privdns-gateway
+  rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /opt/pdg-admin /etc/privdns-gateway
   rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
   [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
   [[ "$SINGBOX_INSTALLED" == 1 ]] && rm -f /usr/local/bin/sing-box
@@ -203,9 +203,15 @@ fi
 
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
-install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot /opt/pdg-admin/web "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
-install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py     /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/pdg_control.py         /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/pdg_links.py           /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/bot/pdg_service.py         /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/admin/pdg-admin.py         /opt/pdg-admin/
+rm -rf /opt/pdg-admin/web; install -d /opt/pdg-admin/web
+cp -a "$REPO_DIR"/deploy/admin/web/.                        /opt/pdg-admin/web/
+install -m755 "$REPO_DIR"/deploy/bot/parse-geosite.py       /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/update-rules.sh      /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/scheduled-update.sh  /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/healthcheck.py      /opt/pdg-bot/
@@ -232,15 +238,33 @@ render(){ sed -e "s|__SERVER_IP__|$SERVER_IP|g" -e "s|__INTERNAL_CIDR__|$INTERNA
 render "$REPO_DIR/deploy/mosdns/config.yaml"          > /etc/mosdns/config.yaml
 render "$REPO_DIR/deploy/singbox/config.json.tmpl"    > /etc/sing-box/config.json
 chmod 700 /etc/sing-box; chmod 600 /etc/sing-box/config.json   # config 含出口密码/uuid
+
+# DoT/数据连接保活: 内核 TCP keepalive 调短, 维持设备休眠/待机与基站专线期间 NAT 表项不断。
+# mosdns :853 与 sing-box :443/:80 共用此内核参数(两者默认 SO_KEEPALIVE 已开, 仅间隔过长)。
+cat > /etc/sysctl.d/99-pdg-keepalive.conf <<'EOF'
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 15
+net.ipv4.tcp_keepalive_probes = 3
+EOF
+sysctl --system >/dev/null 2>&1 || true
 [[ -e /etc/nftables.conf.pdg-orig ]] || cp -a /etc/nftables.conf /etc/nftables.conf.pdg-orig 2>/dev/null || true  # 供 uninstall 还原
 render "$REPO_DIR/deploy/firewall/nftables.conf"      > /etc/nftables.conf
 render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-bot.service
 chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token 在 bot.env)
 
-# token / 允许 id 写入受限的 bot.env (目录 700 / 文件 600), 不进 unit 也不进版本库
+# token / 允许 id 写入受限文件(目录 700 / 文件 600), 不进 unit 也不进版本库
 install -d -m700 /etc/privdns-gateway
 ( umask 077; printf 'PDG_BOT_TOKEN=%s\nPDG_BOT_ALLOWED=%s\n' "$BOT_TOKEN" "$ALLOWED_IDS" > /etc/privdns-gateway/bot.env )
 chmod 600 /etc/privdns-gateway/bot.env
+ADMIN_TOKEN="${PDG_ADMIN_TOKEN:-}"
+if [[ -z "$ADMIN_TOKEN" && -s /etc/privdns-gateway/admin.token ]]; then
+  ADMIN_TOKEN=$(cat /etc/privdns-gateway/admin.token)
+fi
+[[ -n "$ADMIN_TOKEN" ]] || ADMIN_TOKEN=$(openssl rand -hex 32)
+[[ ${#ADMIN_TOKEN} -ge 32 ]] || die "PDG_ADMIN_TOKEN 至少需要 32 个字符"
+( umask 077; printf '%s\n' "$ADMIN_TOKEN" > /etc/privdns-gateway/admin.token )
+chmod 600 /etc/privdns-gateway/admin.token
+install -m644 "$REPO_DIR"/deploy/admin/pdg-admin.service      /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.service /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-rules-update.timer   /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service       /etc/systemd/system/
@@ -311,7 +335,7 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemctl enable --now mosdns sing-box pdg-probe81 >/dev/null 2>&1 || true
+systemctl enable --now mosdns sing-box pdg-admin pdg-probe81 >/dev/null 2>&1 || true
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true
 if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
@@ -333,7 +357,7 @@ c_g "校验核心服务(需连续保持 active, 防起来又崩)…"
 svc_ok=0; streak=0
 for _ in $(seq 1 20); do
   allact=1
-  for s in mosdns sing-box pdg-probe81; do
+  for s in mosdns sing-box pdg-admin pdg-probe81; do
     [[ "$(systemctl is-active "$s" 2>/dev/null)" == active ]] || allact=0
   done
   if [[ "$allact" == 1 ]]; then streak=$((streak+1)); else streak=0; fi
@@ -341,15 +365,15 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 if [[ "$svc_ok" != 1 ]]; then
-  for s in mosdns sing-box pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
-  journalctl -u mosdns -u sing-box -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
+  for s in mosdns sing-box pdg-admin pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
+  journalctl -u mosdns -u sing-box -u pdg-admin -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
   die "核心服务未能持续保持运行(见上日志)。"   # → 触发回滚
 fi
 INSTALL_OK=1   # 提交点: 核心服务已确认稳定 active, 后面只是打印, 不再回滚
 
 # ── 10. 自检 ──
 echo; c_g "安装完成。状态:"
-for s in mosdns sing-box pdg-bot pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+for s in mosdns sing-box pdg-bot pdg-admin pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
   echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
   c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"
@@ -362,8 +386,9 @@ cat <<EOF
        • 「📤 出口管理 → 添加」粘贴 ss:// / vmess:// / trojan:// / vless:// 落地节点
        • 「📑 分流管理」按需把域名/规则集指到出口 (默认其余国际走 jp 直出)
   3) iOS 用户: bot「📱 客户端 → iOS 描述文件」, 装上即可(蜂窝探测 :81 已就绪)
-  4) 换域名随时用 bot「🌐 DoT 自定义域名」
+  4) 管理面板: https://$DOT_DOMAIN:9443/  (仅内网卡可达; Bot「📱 客户端 → 管理面板」自动带令牌)
+  5) 换域名随时用 bot「🌐 DoT 自定义域名」
 
-🛠 日常管理:  sudo pdg   (状态 / 更新 / 换 token / 重启 / 日志 / 卸载)
+🛠 日常管理:  sudo pdg   (状态 / 管理面板令牌 / 更新 / 重启 / 日志 / 卸载)
 ⚠️ SSH 端口当前按 $SSH_PORT 放行; 若你之后改 sshd Port, 记得同步改 /etc/nftables.conf 再 nft -f。
 EOF

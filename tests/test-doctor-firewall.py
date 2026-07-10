@@ -6,11 +6,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 checks_src = (ROOT / "deploy/bot/checks.py").read_text(encoding="utf-8")
 
-assert '{"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445"}' in checks_src, (
-    "doctor firewall leak detection must include TG SOCKS5 8445 and GMS 5228-5230"
+assert '{"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445", "9443"}' in checks_src, (
+    "doctor firewall leak detection must include admin 9443, TG 8445 and GMS 5228-5230"
 )
-assert "53/80/81/443/853/5228-5230/8445" in checks_src, (
-    "doctor firewall OK text should mention 8445 and 5228-5230"
+assert "53/80/81/443/853/5228-5230/8445/9443" in checks_src, (
+    "doctor firewall OK text should mention admin, TG and GMS ports"
 )
 
 # 动态: 端口区间写法(如 5228-5230)对全网开放也要被识别为泄露; 限内网来源则不报。
@@ -33,7 +33,7 @@ assert st == "ok", (st, msg)
 checks._run = lambda cmd: (0, "chain input {\n tcp dport { 1-65535 } accept\n}", "")
 st, _, msg = checks.check_nft()
 assert st == "fail", (st, msg)
-for p in ("53", "443", "5228", "5230", "8445"):
+for p in ("53", "443", "5228", "5230", "8445", "9443"):
     assert p in msg, (p, msg)
 
 # 宽区间但限定内网来源: 不算泄露
@@ -47,9 +47,23 @@ import json, tempfile
 NFT_OK = ("chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80-81, 443, 853, 5228-5230, 8445 } accept\n}")
 NFT_NO_GMS = ("chain input {\n ip saddr 172.22.0.0/16 tcp dport { 53, 80-81, 443, 853, 8445 } accept\n}")
 
-def gms_case(ports, nft_out):
+def gms_case(ports, nft_out, legacy_sniff=False):
+    gms_inbounds = []
+    for p in ports:
+        inbound = {"type": "direct", "tag": f"in-gms-{p}", "listen_port": p}
+        if legacy_sniff and p in (5228, 5229, 5230):
+            inbound["sniff"] = True
+        gms_inbounds.append(inbound)
+    config = {
+        "inbounds": gms_inbounds,
+        "outbounds": [{"type": "direct", "tag": "gms-mtalk", "override_address": "mtalk.google.com"}],
+        "route": {"rules": [{
+            "inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"],
+            "outbound": "gms-mtalk",
+        }]},
+    }
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-        json.dump({"inbounds": [{"type": "direct", "listen_port": p} for p in ports]}, f)
+        json.dump(config, f)
         path = f.name
     checks.SB = path
     checks._run = lambda cmd: (0, nft_out, "")
@@ -57,6 +71,9 @@ def gms_case(ports, nft_out):
 
 st, _, msg = gms_case([443, 80, 5228, 5229, 5230], NFT_OK)
 assert st == "ok" and "5228-5230" in msg, (st, msg)
+
+st, _, msg = gms_case([443, 80, 5228, 5229, 5230], NFT_OK, legacy_sniff=True)
+assert st == "warn" and "旧版" in msg, (st, msg)
 
 st, _, msg = gms_case([443, 80, 5229, 5230], NFT_OK)          # sing-box 缺 5228
 assert st == "warn" and "pdg" in msg, (st, msg)

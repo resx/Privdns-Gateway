@@ -94,6 +94,8 @@ mod._dot_host = lambda: "dot.test"                 # nav:client 标题会用到
 for data in ("menu", "status", "nav:client", "nav:exit", "nav:rule", "nav:ops"):
     mod.state[1] = "ios_ssid"
     mod.del_sel[1] = {"x.com"}
+    mod.pending_outbound[1] = {"tag": "stale"}
     mod.handle_cb(1, 9, data)
     assert 1 not in mod.state, f"{data} 后待输入状态应被清掉"
     assert 1 not in mod.del_sel, f"{data} 后删除勾选应被清掉"
+    assert 1 not in mod.pending_outbound, f"{data} 后待确认出口应被清掉"

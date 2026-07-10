@@ -67,7 +67,7 @@ snap="$(cat "$WORK/fw4")"
 NFT_RC=1; migrate_fw_gms "$WORK/fw4"; NFT_RC=0
 [[ "$(cat "$WORK/fw4")" == "$snap" ]] && ok "fw nft 校验失败 → 还原" || bad "fw 校验失败未还原!"
 
-# ── sing-box: 本项目形态配置 → 补 3 个入站(在 :80 之后), 幂等 ──
+# ── sing-box: 本项目形态配置 → 补 3 个无嗅探入站 + mtalk 改写出站和入口路由, 幂等 ──
 cat > "$WORK/sb.json" <<'EOF'
 {
   "inbounds": [
@@ -82,15 +82,19 @@ cat > "$WORK/sb.json" <<'EOF'
 }
 EOF
 migrate_singbox_gms "$WORK/sb.json"
-python3 - "$WORK/sb.json" <<'PY' && ok "sb 补入站(5228/5229/5230, 位于 :80 后)" || bad "sb 入站缺失或位置/字段不对"
+python3 - "$WORK/sb.json" <<'PY' && ok "sb 补无嗅探入站 + mtalk 改写出站/路由" || bad "sb GMS 入站或路由缺失"
 import json, sys
 c = json.load(open(sys.argv[1]))
 ports = [i.get("listen_port") for i in c["inbounds"]]
 assert ports == [443, 80, 5228, 5229, 5230, 8445], ports
 for i in c["inbounds"]:
     if i.get("listen_port") in (5228, 5229, 5230):
-        assert i["type"] == "direct" and i["sniff"] and i["sniff_override_destination"], i
+        assert i["type"] == "direct" and not i.get("sniff") and not i.get("sniff_override_destination"), i
         assert i["network"] == "tcp" and i["tag"] == "in-gms-%d" % i["listen_port"], i
+out = next(o for o in c["outbounds"] if o.get("tag") == "gms-mtalk")
+assert out["type"] == "direct" and out["override_address"] == "mtalk.google.com", out
+rule = c["route"]["rules"][0]
+assert rule == {"inbound": ["in-gms-5228", "in-gms-5229", "in-gms-5230"], "outbound": "gms-mtalk"}, rule
 PY
 snap="$(cat "$WORK/sb.json")"
 migrate_singbox_gms "$WORK/sb.json"
