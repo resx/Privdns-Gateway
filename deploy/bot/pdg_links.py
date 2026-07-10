@@ -5,11 +5,29 @@ from __future__ import annotations
 import base64
 import json
 import re
+import unicodedata
 import urllib.parse
 
 
+def _truncate_utf8(value: str, max_bytes: int) -> str:
+    while len(value.encode("utf-8")) > max_bytes:
+        value = value[:-1]
+    return value
+
+
 def normalize_tag(name, host="", port=""):
-    return re.sub(r"[^A-Za-z0-9_.-]", "-", (name or f"{host}:{port}"))[:40] or "exit"
+    value = unicodedata.normalize("NFKC", str(name or f"{host}:{port}").strip())
+    output = []
+    for character in value:
+        category = unicodedata.category(character)
+        if character.isalnum() or character in "_.-" or category.startswith(("M", "S")):
+            output.append(character)
+        elif character.isspace():
+            output.append("-")
+        else:
+            output.append("-")
+    tag = re.sub(r"-+", "-", "".join(output)).strip("-.") or "exit"
+    return _truncate_utf8(tag, 64)
 
 
 def parse_link(link):

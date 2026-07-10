@@ -195,6 +195,7 @@ const subscriptionRename = ref('')
 const subscriptionSort = ref<'source' | 'name'>('source')
 const subscriptionTfo = ref(false)
 const subscriptionUdpFragment = ref(false)
+const subscriptionAdvanced = ref(false)
 const subscriptionPreview = ref<SubscriptionPreview | null>(null)
 const testTarget = ref('google')
 const resources = ref<Resources | null>(null)
@@ -449,6 +450,12 @@ function editSubscription(item?: Subscription) {
   subscriptionSort.value = item?.overrides?.sort || 'source'
   subscriptionTfo.value = item?.overrides?.properties?.tcp_fast_open || false
   subscriptionUdpFragment.value = item?.overrides?.properties?.udp_fragment || false
+  subscriptionAdvanced.value = Boolean(item && (
+    item.include || item.exclude || item.categories.length
+    || (item.group && item.group !== `${item.id}-auto`)
+    || item.overrides.types.length || item.overrides.rename.length
+    || item.overrides.sort !== 'source' || Object.values(item.overrides.properties).some(Boolean)
+  ))
   subscriptionPreview.value = null
   subscriptionPreviewInput.value = ''
   showSubscription.value = true
@@ -720,6 +727,7 @@ async function applyOverridePreset(preset: OverridePreset) {
   if (preset.sort) subscriptionSort.value = preset.sort
   if (preset.tcpFastOpen) subscriptionTfo.value = true
   if (preset.udpFragment) subscriptionUdpFragment.value = true
+  subscriptionAdvanced.value = true
   page.value = 'nodes'
   await previewNodeSubscription()
   if (subscriptionPreview.value) flash(`已套用“${preset.name}”，确认差异后再应用`)
@@ -931,7 +939,7 @@ onBeforeUnmount(() => {
             <option value="google">Google 204</option><option value="cloudflare">Cloudflare 204</option><option value="apple">Apple</option>
           </select>
           <button class="secondary" :disabled="testing" @click="testExits()"><Gauge :size="17" />{{ testing ? '测速中…' : '批量测速' }}</button>
-          <button class="secondary" @click="editSubscription()"><Database :size="17" />节点订阅</button>
+          <button class="secondary" @click="editSubscription()"><Database :size="17" />添加订阅</button>
           <button class="secondary" @click="editGroup()"><Network :size="17" />节点组</button>
           <button class="primary" @click="showAdd = !showAdd; preview = null"><Plus :size="17" />添加节点</button>
         </div>
@@ -941,24 +949,31 @@ onBeforeUnmount(() => {
             <button class="secondary" @click="showSubscription = false">关闭</button>
           </div>
           <div class="subscription-form">
-            <input v-model="subscriptionUrl" type="url" :placeholder="editingSubscription ? '留空保留原订阅地址' : 'https://example.com/subscribe?token=…'" />
-            <input v-model="subscriptionLabel" placeholder="显示名称，例如 机场 A" />
-            <input v-model="subscriptionGroup" placeholder="分类组名称，支持中文和其他语言；留空自动生成" />
-            <input v-model="subscriptionInclude" placeholder="包含正则，例如 香港|HK" />
-            <input v-model="subscriptionExclude" placeholder="排除正则，例如 过期|剩余流量" />
-            <textarea v-model="subscriptionCategories" rows="3" placeholder="附加分类，每行 名称=正则，例如：&#10;香港=香港|HK&#10;台湾=台湾|TW"></textarea>
-            <fieldset class="override-box">
-              <legend>结构化覆写</legend>
-              <div class="protocol-picker">
-                <label v-for="protocol in protocolOptions" :key="protocol"><input v-model="subscriptionTypes" type="checkbox" :value="protocol" />{{ protocol }}</label>
-              </div>
-              <textarea v-model="subscriptionRename" rows="3" placeholder="正则重命名，每行 匹配 => 替换，例如：^(HK)- => 香港-$1-"></textarea>
-              <div class="override-options">
-                <label>排序<select v-model="subscriptionSort"><option value="source">订阅原序</option><option value="name">按名称</option></select></label>
-                <label class="switch-row"><input v-model="subscriptionTfo" type="checkbox" />TCP Fast Open</label>
-                <label class="switch-row"><input v-model="subscriptionUdpFragment" type="checkbox" />UDP 分片</label>
-              </div>
-            </fieldset>
+            <div class="subscription-basic">
+              <input v-model="subscriptionUrl" type="url" :placeholder="editingSubscription ? '新的完整订阅 URL（留空保留当前地址）' : '完整订阅 URL，例如 https://example.com/sub?token=…&amp;client=sing-box'" />
+              <input v-model="subscriptionLabel" placeholder="订阅名称（可选）" />
+            </div>
+            <button class="secondary advanced-toggle" :aria-expanded="subscriptionAdvanced" @click="subscriptionAdvanced = !subscriptionAdvanced">
+              <Settings :size="16" />{{ subscriptionAdvanced ? '收起高级设置' : '高级设置' }}
+            </button>
+            <div v-if="subscriptionAdvanced" class="subscription-advanced">
+              <input v-model="subscriptionGroup" placeholder="分类组名称（留空自动生成）" />
+              <input v-model="subscriptionInclude" placeholder="仅保留名称匹配，例如 香港|HK" />
+              <input v-model="subscriptionExclude" placeholder="排除名称匹配，例如 过期|剩余流量" />
+              <textarea v-model="subscriptionCategories" rows="3" placeholder="附加分类，每行 名称=正则，例如：&#10;🇭🇰 香港=香港|HK&#10;🇹🇼 台湾=台湾|TW"></textarea>
+              <fieldset class="override-box">
+                <legend>结构化覆写</legend>
+                <div class="protocol-picker">
+                  <label v-for="protocol in protocolOptions" :key="protocol"><input v-model="subscriptionTypes" type="checkbox" :value="protocol" />{{ protocol }}</label>
+                </div>
+                <textarea v-model="subscriptionRename" rows="3" placeholder="正则重命名，每行 匹配 => 替换，例如：^(HK)- => 🇭🇰 香港-$1-"></textarea>
+                <div class="override-options">
+                  <label>排序<select v-model="subscriptionSort"><option value="source">订阅原序</option><option value="name">按名称</option></select></label>
+                  <label class="switch-row"><input v-model="subscriptionTfo" type="checkbox" />TCP Fast Open</label>
+                  <label class="switch-row"><input v-model="subscriptionUdpFragment" type="checkbox" />UDP 分片</label>
+                </div>
+              </fieldset>
+            </div>
           </div>
           <div v-if="subscriptionPreview" class="subscription-preview">
             <div><span>可用节点</span><strong>{{ subscriptionPreview.count }}</strong></div>

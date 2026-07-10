@@ -46,7 +46,7 @@ def check(name, got, **want):
 check("Surge ss 行",
       m.parse_link('🇭🇰 X = ss, 1.2.3.4, 11111, encrypt-method=2022-blake3-aes-128-gcm, '
                    'password="ab+C/9==", tfo=true, udp-relay=true'),
-      type="shadowsocks", server="1.2.3.4", server_port=11111,
+      type="shadowsocks", tag="🇭🇰-X", server="1.2.3.4", server_port=11111,
       method="2022-blake3-aes-128-gcm", password="ab+C/9==", tcp_fast_open=True)
 
 # ss:// SIP002
@@ -96,10 +96,10 @@ check("http://", m.parse_link("http://user:pass@1.2.3.4:8080#HTTP"),
 
 # Base64 节点订阅与 SIP008
 subscription = base64.urlsafe_b64encode(
-    b"socks5://u:p@one.example:1080#ONE\ninvalid://skip"
+    "socks5://u:p@one.example:1080#🇭🇰 香港 01\ninvalid://skip".encode()
 ).rstrip(b"=")
 nodes, skipped = parse_subscription(subscription)
-check("Base64 节点订阅", nodes[0], type="socks", server="one.example", tag="ONE")
+check("Base64 节点订阅", nodes[0], type="socks", server="one.example", tag="🇭🇰-香港-01")
 if len(nodes) != 1 or len(skipped) != 1:
     print("[FAIL] Base64 订阅跳过统计", len(nodes), len(skipped)); fails += 1
 else:

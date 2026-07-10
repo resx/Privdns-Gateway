@@ -352,11 +352,12 @@ class GatewayService:
         value = unicodedata.normalize("NFKC", value.strip() or fallback.strip())
         output = []
         for character in value:
-            if character.isalnum() or character in "_.-":
+            category = unicodedata.category(character)
+            if character.isalnum() or character in "_.-" or category.startswith("S"):
                 output.append(character)
             elif character.isspace():
                 output.append("-")
-            elif unicodedata.category(character).startswith("M") and output:
+            elif category.startswith("M") and output:
                 output.append(character)
             else:
                 output.append("-")

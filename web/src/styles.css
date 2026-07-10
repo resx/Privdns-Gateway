@@ -123,8 +123,11 @@ button { border: 0; cursor: pointer; }
 .route-result { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; gap: 4px 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .route-result strong { color: var(--accent); font-size: 1.15rem; }
 .route-result small { grid-column: 1 / -1; color: var(--muted); }
-.subscription-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
-.subscription-form > input:first-child, .subscription-form > textarea { grid-column: 1 / -1; }
+.subscription-form { display: grid; gap: 10px; }
+.subscription-basic { display: grid; grid-template-columns: minmax(0, 2fr) minmax(180px, 1fr); gap: 9px; }
+.advanced-toggle { justify-self: start; display: inline-flex; align-items: center; gap: 7px; }
+.subscription-advanced { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding-top: 12px; border-top: 1px solid var(--line); }
+.subscription-advanced > textarea { grid-column: 1 / -1; }
 .override-box { grid-column: 1 / -1; margin: 4px 0 0; padding: 15px; border: 1px solid var(--line); border-radius: 12px; }
 .override-box legend { padding: 0 7px; color: var(--blue); font-size: .76rem; font-weight: 800; }
 .protocol-picker { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 10px; }
@@ -215,8 +218,8 @@ button { border: 0; cursor: pointer; }
   .text-danger { justify-self: end; }
   .route-tester { grid-template-columns: 1fr; }
   .route-result { grid-column: auto; }
-  .subscription-form, .subscription-preview, .subscription-row, .ruleset-form, .ruleset-row, .resource-grid, .preset-grid { grid-template-columns: 1fr; }
-  .subscription-form > input:first-child, .subscription-form > textarea, .subscription-preview p { grid-column: auto; }
+  .subscription-basic, .subscription-advanced, .subscription-preview, .subscription-row, .ruleset-form, .ruleset-row, .resource-grid, .preset-grid { grid-template-columns: 1fr; }
+  .subscription-advanced > textarea, .subscription-preview p { grid-column: auto; }
   .override-box { grid-column: auto; }
   .override-options { grid-template-columns: 1fr; align-items: stretch; }
   .resource-list > div { grid-template-columns: 65px 1fr; padding: 9px 0; }

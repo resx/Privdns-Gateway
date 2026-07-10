@@ -73,6 +73,9 @@ grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \
   && grep -q '/api/v1/subscriptions' "$ROOT/deploy/admin/pdg-admin.py" \
   && grep -q 'refresh_subscriptions' "$ROOT/deploy/bot/scheduled-update.sh" \
   && ok "节点订阅已接入 PWA/API/定时刷新" || bad "节点订阅部署链路缺失"
+grep -q 'subscriptionAdvanced' "$ROOT/web/src/App.vue" \
+  && grep -q '完整订阅 URL' "$ROOT/web/src/App.vue" \
+  && ok "订阅添加已简化并保留高级设置" || bad "订阅添加基础/高级分层缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"

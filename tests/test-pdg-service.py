@@ -83,26 +83,26 @@ with tempfile.TemporaryDirectory() as directory:
     service.set_final("new")
     assert service.overview()["default_exit"] == "new"
 
-    group = service.save_group("自动优选_日本", ["hk", "new"])
-    assert group == {"tag": "自动优选_日本", "members": ["hk", "new"], "mode": "auto", "selected": None}
-    assert service.set_group_selection("自动优选_日本", "new") == {
-        "tag": "自动优选_日本", "mode": "manual", "selected": "new",
+    group = service.save_group("🇯🇵 自动优选_日本", ["hk", "new"])
+    assert group == {"tag": "🇯🇵-自动优选_日本", "members": ["hk", "new"], "mode": "auto", "selected": None}
+    assert service.set_group_selection("🇯🇵-自动优选_日本", "new") == {
+        "tag": "🇯🇵-自动优选_日本", "mode": "manual", "selected": "new",
     }
     current = json.loads(config_path.read_text(encoding="utf-8"))
-    fixed_group = next(item for item in current["outbounds"] if item.get("tag") == "自动优选_日本")
+    fixed_group = next(item for item in current["outbounds"] if item.get("tag") == "🇯🇵-自动优选_日本")
     assert fixed_group["type"] == "selector" and fixed_group["default"] == "new"
-    service.save_group("自动优选_日本", ["hk", "new"])
-    assert service.set_group_selection("自动优选_日本", None)["mode"] == "auto"
+    service.save_group("🇯🇵 自动优选_日本", ["hk", "new"])
+    assert service.set_group_selection("🇯🇵-自动优选_日本", None)["mode"] == "auto"
     try:
         service.save_group("bad", ["hk"])
         raise AssertionError("single-member group should fail")
     except ServiceError as error:
         assert "两个" in str(error)
-    assert any(item["tag"] == "自动优选_日本" and item["members"] == ["hk", "new"] for item in service.list_exits())
+    assert any(item["tag"] == "🇯🇵-自动优选_日本" and item["members"] == ["hk", "new"] for item in service.list_exits())
 
     subscription_text = "\n".join([
-        "socks5://user:pass@sub-hk.example.com:1080#HK-01",
-        "socks5://user:pass@sub-tw.example.com:1080#TW-01",
+        "socks5://user:pass@sub-hk.example.com:1080#🇭🇰 HK-01",
+        "socks5://user:pass@sub-tw.example.com:1080#🇹🇼 TW-01",
         "unsupported://ignored",
     ])
     subscription_data = base64.urlsafe_b64encode(subscription_text.encode()).rstrip(b"=")
@@ -119,7 +119,7 @@ with tempfile.TemporaryDirectory() as directory:
     except ServiceError as error:
         assert "没有可用节点" in str(error)
     assert config_path.read_bytes() == unchanged
-    subscription_url = "https://subscribe.example/nodes?token=top-secret"
+    subscription_url = "https://subscribe.example/nodes?token=top-secret&client=sing-box&udp=1"
     categories = [{"name": "香港", "pattern": "HK|香港"}, {"name": "台湾", "pattern": "TW|台湾"}]
     overrides = {
         "types": ["socks"], "rename": [{"pattern": "^(HK|TW)-", "replacement": "Region-$1-"}],
@@ -130,6 +130,8 @@ with tempfile.TemporaryDirectory() as directory:
     )
     assert sub_preview["count"] == 2 and sub_preview["skipped"] == 1
     assert [group["count"] for group in sub_preview["groups"]] == [2, 1, 1]
+    assert any("🇭🇰" in node["tag"] for node in sub_preview["nodes"])
+    assert any("🇹🇼" in node["tag"] for node in sub_preview["nodes"])
     assert "top-secret" not in json.dumps(sub_preview, ensure_ascii=False)
     assert sub_preview["overrides"] == overrides
     saved_sub = service.save_subscription(
@@ -138,6 +140,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert saved_sub["count"] == 2 and saved_sub["has_secret"]
     assert "top-secret" not in json.dumps(service.list_subscriptions(), ensure_ascii=False)
     sub_meta = json.loads(subscription_path.read_text(encoding="utf-8"))[saved_sub["id"]]
+    assert sub_meta["url"] == subscription_url
     assert sub_meta["overrides"] == overrides
     old_nodes = sub_meta["nodes"]
     current = json.loads(config_path.read_text(encoding="utf-8"))
@@ -162,7 +165,7 @@ with tempfile.TemporaryDirectory() as directory:
     service.set_group_selection(sub_meta["group"], old_nodes[0])
 
     service._fetch_subscription = lambda url: base64.urlsafe_b64encode(
-        b"socks5://user:newpass@sub-hk.example.com:1080#HK-01"
+        "socks5://user:newpass@sub-hk.example.com:1080#🇭🇰 HK-01".encode()
     ).rstrip(b"=")
     refreshed_sub = service.refresh_subscription(saved_sub["id"])
     assert refreshed_sub["count"] == 1
@@ -223,7 +226,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     assert service.remove_ruleset(ruleset["tag"])["deleted"] == ruleset["tag"]
     assert all(item["tag"] != ruleset["tag"] for item in service.list_rulesets())
-    service.remove_group("自动优选_日本")
+    service.remove_group("🇯🇵-自动优选_日本")
 
     impact = service.exit_impact("hk")
     assert impact["groups"] == ["auto"] and impact["rules"]
