@@ -65,6 +65,10 @@ grep -q 'panel/zashboard' "$ROOT/install.sh" \
   && ok "Zashboard 经 9443 受限代理部署,Clash API 保持本机" || bad "Zashboard 部署或安全边界缺失"
 [[ -f "$ROOT/panel/zashboard/LICENSE" && -f "$ROOT/panel/zashboard/UPSTREAM.md" ]] \
   && ok "Zashboard 上游版本与许可证已记录" || bad "Zashboard 归属文件缺失"
+grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \
+  && grep -q '/api/v1/subscriptions' "$ROOT/deploy/admin/pdg-admin.py" \
+  && grep -q 'refresh_subscriptions' "$ROOT/deploy/bot/scheduled-update.sh" \
+  && ok "节点订阅已接入 PWA/API/定时刷新" || bad "节点订阅部署链路缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"

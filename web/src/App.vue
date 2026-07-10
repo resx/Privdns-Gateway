@@ -42,6 +42,36 @@ interface DelayResult {
   ok: boolean
   delay: number | null
 }
+interface Subscription {
+  id: string
+  label: string
+  url: string
+  has_secret: boolean
+  include: string
+  exclude: string
+  group: string
+  groups: { tag: string; label: string; count: number }[]
+  categories: { name: string; pattern: string }[]
+  count: number
+  skipped: number
+  updated_at: string | null
+}
+interface SubscriptionPreview {
+  id: string
+  url_display: string
+  label: string
+  include: string
+  exclude: string
+  group: string
+  count: number
+  skipped: number
+  added: string[]
+  updated: string[]
+  removed: string[]
+  nodes: { tag: string; type: string; server: string; server_port: number }[]
+  groups: { tag: string; label: string; count: number; master: boolean }[]
+  categories: { name: string; pattern: string }[]
+}
 interface Ruleset {
   tag: string
   label: string
@@ -90,6 +120,7 @@ const overview = ref<Overview | null>(null)
 const exits = ref<Exit[]>([])
 const rules = ref<Rule[]>([])
 const rulesets = ref<Ruleset[]>([])
+const subscriptions = ref<Subscription[]>([])
 const delays = ref<Record<string, DelayResult>>({})
 const runtime = ref<RuntimeState | null>(null)
 const logs = ref<string[]>([])
@@ -109,6 +140,16 @@ const editingGroup = ref(false)
 const rulesetUrl = ref('')
 const rulesetLabel = ref('')
 const rulesetTarget = ref('direct')
+const showSubscription = ref(false)
+const editingSubscription = ref<Subscription | null>(null)
+const subscriptionUrl = ref('')
+const subscriptionLabel = ref('')
+const subscriptionInclude = ref('')
+const subscriptionExclude = ref('')
+const subscriptionGroup = ref('')
+const subscriptionCategories = ref('')
+const subscriptionPreview = ref<SubscriptionPreview | null>(null)
+const subscriptionPreviewInput = ref('')
 
 const concreteExits = computed(() => exits.value.filter(item => item.type !== 'urltest'))
 
@@ -158,16 +199,18 @@ async function loadAll() {
   loading.value = true
   error.value = ''
   try {
-    const [summary, exitList, ruleList, rulesetList] = await Promise.all([
+    const [summary, exitList, ruleList, rulesetList, subscriptionList] = await Promise.all([
       api<Overview>('/api/v1/overview'),
       api<Exit[]>('/api/v1/exits'),
       api<Rule[]>('/api/v1/rules'),
       api<Ruleset[]>('/api/v1/rulesets'),
+      api<Subscription[]>('/api/v1/subscriptions'),
     ])
     overview.value = summary
     exits.value = exitList
     rules.value = ruleList
     rulesets.value = rulesetList
+    subscriptions.value = subscriptionList
     if (!exits.value.some(item => item.tag === ruleTarget.value)) ruleTarget.value = 'direct'
     if (!exits.value.some(item => item.tag === rulesetTarget.value)) rulesetTarget.value = exits.value[0]?.tag || 'direct'
   } catch (cause) {
@@ -267,6 +310,126 @@ async function testExits() {
     error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     testing.value = false
+  }
+}
+
+function categoryRules() {
+  return subscriptionCategories.value.split('\n').map(line => line.trim()).filter(Boolean).map(line => {
+    const separator = line.indexOf('=')
+    return {
+      name: separator >= 0 ? line.slice(0, separator).trim() : line,
+      pattern: separator >= 0 ? line.slice(separator + 1).trim() : '',
+    }
+  })
+}
+
+function subscriptionPayload() {
+  return {
+    ...(subscriptionUrl.value.trim() ? { url: subscriptionUrl.value.trim() } : {}),
+    label: subscriptionLabel.value.trim(),
+    include: subscriptionInclude.value.trim(),
+    exclude: subscriptionExclude.value.trim(),
+    group: subscriptionGroup.value.trim(),
+    categories: categoryRules(),
+  }
+}
+
+function subscriptionInputKey() {
+  return JSON.stringify(subscriptionPayload())
+}
+
+function editSubscription(item?: Subscription) {
+  editingSubscription.value = item || null
+  subscriptionUrl.value = ''
+  subscriptionLabel.value = item?.label || ''
+  subscriptionInclude.value = item?.include || ''
+  subscriptionExclude.value = item?.exclude || ''
+  subscriptionGroup.value = item?.group || ''
+  subscriptionCategories.value = (item?.categories || []).map(category => `${category.name}=${category.pattern}`).join('\n')
+  subscriptionPreview.value = null
+  subscriptionPreviewInput.value = ''
+  showSubscription.value = true
+}
+
+async function previewNodeSubscription() {
+  error.value = ''
+  const payload = subscriptionPayload()
+  if (!editingSubscription.value && !payload.url) {
+    error.value = '请输入节点订阅 URL'
+    return
+  }
+  try {
+    const path = editingSubscription.value
+      ? `/api/v1/subscriptions/${encodeURIComponent(editingSubscription.value.id)}/preview`
+      : '/api/v1/subscriptions/preview'
+    subscriptionPreview.value = await api<SubscriptionPreview>(path, {
+      method: 'POST', body: JSON.stringify(payload),
+    })
+    subscriptionPreviewInput.value = subscriptionInputKey()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function saveNodeSubscription() {
+  if (!subscriptionPreview.value || subscriptionPreviewInput.value !== subscriptionInputKey()) {
+    error.value = '订阅参数已变化，请重新预览差异'
+    return
+  }
+  loading.value = true
+  error.value = ''
+  try {
+    const path = editingSubscription.value
+      ? `/api/v1/subscriptions/${encodeURIComponent(editingSubscription.value.id)}`
+      : '/api/v1/subscriptions'
+    await api(path, { method: editingSubscription.value ? 'PUT' : 'POST', body: JSON.stringify(subscriptionPayload()) })
+    showSubscription.value = false
+    editingSubscription.value = null
+    subscriptionPreview.value = null
+    flash('节点订阅已应用')
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function refreshNodeSubscription(item: Subscription) {
+  error.value = ''
+  try {
+    await api(`/api/v1/subscriptions/${encodeURIComponent(item.id)}/refresh`, { method: 'POST', body: '{}' })
+    flash(`${item.label} 已刷新`)
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function refreshAllSubscriptions() {
+  error.value = ''
+  try {
+    const result = await api<{ id: string; ok: boolean; error?: string }[]>('/api/v1/subscriptions/refresh', {
+      method: 'POST', body: '{}',
+    })
+    const failed = result.filter(item => !item.ok)
+    flash(failed.length ? `${result.length - failed.length} 个成功，${failed.length} 个失败` : `已刷新 ${result.length} 个订阅`)
+    if (failed.length) error.value = failed.map(item => item.error || item.id).join('；')
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+async function removeNodeSubscription(item: Subscription) {
+  if (!window.confirm(`删除节点订阅 ${item.label}？\n将删除其 ${item.count} 个节点和分类组，引用会迁移到可用出口。`)) return
+  error.value = ''
+  try {
+    await api(`/api/v1/subscriptions/${encodeURIComponent(item.id)}`, { method: 'DELETE' })
+    flash(`${item.label} 已删除`)
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
   }
 }
 
@@ -557,9 +720,58 @@ onBeforeUnmount(() => {
         <div class="section-actions">
           <button class="secondary" @click="openZashboard">实时节点</button>
           <button class="secondary" :disabled="testing" @click="testExits">{{ testing ? '测速中…' : '批量测速' }}</button>
+          <button class="secondary" @click="editSubscription()">＋ 节点订阅</button>
           <button class="secondary" @click="editGroup()">＋ 故障组</button>
           <button class="primary" @click="showAdd = !showAdd; preview = null">＋ 添加出口</button>
         </div>
+        <section v-if="showSubscription" class="panel add-panel">
+          <div class="section-title">
+            <div><p class="eyebrow">NODE SUBSCRIPTION</p><h2>{{ editingSubscription ? `编辑 ${editingSubscription.label}` : '添加节点订阅' }}</h2></div>
+            <button class="secondary" @click="showSubscription = false">关闭</button>
+          </div>
+          <div class="subscription-form">
+            <input v-model="subscriptionUrl" type="url" :placeholder="editingSubscription ? '留空保留原订阅地址' : 'https://example.com/subscribe?token=…'" />
+            <input v-model="subscriptionLabel" placeholder="显示名称，例如 机场 A" />
+            <input v-model="subscriptionGroup" placeholder="分类组名称，留空自动生成" />
+            <input v-model="subscriptionInclude" placeholder="包含正则，例如 香港|HK" />
+            <input v-model="subscriptionExclude" placeholder="排除正则，例如 过期|剩余流量" />
+            <textarea v-model="subscriptionCategories" rows="3" placeholder="附加分类，每行 名称=正则，例如：&#10;香港=香港|HK&#10;台湾=台湾|TW"></textarea>
+          </div>
+          <div v-if="subscriptionPreview" class="subscription-preview">
+            <div><span>可用节点</span><strong>{{ subscriptionPreview.count }}</strong></div>
+            <div><span>新增</span><strong>{{ subscriptionPreview.added.length }}</strong></div>
+            <div><span>更新</span><strong>{{ subscriptionPreview.updated.length }}</strong></div>
+            <div><span>移除</span><strong>{{ subscriptionPreview.removed.length }}</strong></div>
+            <p>主分类组 <strong>{{ subscriptionPreview.group }}</strong><template v-if="subscriptionPreview.skipped">，跳过 {{ subscriptionPreview.skipped }} 项</template></p>
+            <p v-if="subscriptionPreview.groups.length > 1" class="muted">附加分类：{{ subscriptionPreview.groups.slice(1).map(item => `${item.label} ${item.count}`).join('、') }}</p>
+            <p class="muted node-preview">{{ subscriptionPreview.nodes.map(item => `${item.tag} · ${item.type}`).join('、') }}</p>
+          </div>
+          <div class="form-actions">
+            <button class="secondary" @click="previewNodeSubscription">下载并预览差异</button>
+            <button v-if="subscriptionPreview" class="primary" :disabled="loading" @click="saveNodeSubscription">确认应用</button>
+          </div>
+        </section>
+        <section class="panel subscription-panel">
+          <div class="section-title">
+            <div><p class="eyebrow">SUBSCRIPTIONS</p><h2>节点订阅</h2></div>
+            <button class="secondary" :disabled="!subscriptions.length" @click="refreshAllSubscriptions">全部刷新</button>
+          </div>
+          <p v-if="!subscriptions.length" class="empty-state">尚未添加节点订阅</p>
+          <div v-else class="subscription-list">
+            <div v-for="item in subscriptions" :key="item.id" class="subscription-row">
+              <div>
+                <strong>{{ item.label }}</strong>
+                <small>{{ item.url }}</small>
+                <span>{{ item.count }} 个节点 · {{ item.groups.map(group => `${group.label} ${group.count}`).join('、') }}<template v-if="item.skipped"> · 跳过 {{ item.skipped }}</template></span>
+              </div>
+              <div class="row-actions">
+                <button @click="refreshNodeSubscription(item)">刷新</button>
+                <button @click="editSubscription(item)">过滤与分类</button>
+                <button class="text-danger" @click="removeNodeSubscription(item)">删除</button>
+              </div>
+            </div>
+          </div>
+        </section>
         <section v-if="showGroup" class="panel add-panel">
           <div class="section-title"><div><p class="eyebrow">FAILOVER GROUP</p><h2>故障切换组</h2></div></div>
           <div class="form-grid group-form">

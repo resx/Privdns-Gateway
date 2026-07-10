@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
+import socket
 import tempfile
 import threading
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 from pdg_control import (
@@ -22,7 +25,7 @@ from pdg_control import (
     outbound_impact,
     proxy_outbounds,
 )
-from pdg_links import normalize_tag, parse_link
+from pdg_links import normalize_tag, parse_link, parse_subscription
 
 
 class ServiceError(Exception):
@@ -39,12 +42,14 @@ class GatewayService:
         ruleset_meta_path: str = "/opt/pdg-bot/rulesets.json",
         clash_url: str = "http://127.0.0.1:9090",
         ruleset_dir: str = "/etc/sing-box/rs",
+        subscription_meta_path: str = "/opt/pdg-bot/subscriptions.json",
     ) -> None:
         self.control = control or SingBoxControl()
         self.direct_path = direct_path
         self.ruleset_meta_path = ruleset_meta_path
         self.clash_url = clash_url.rstrip("/")
         self.ruleset_dir = ruleset_dir
+        self.subscription_meta_path = subscription_meta_path
         self._metadata_lock = threading.RLock()
 
     def _run(self, command):
@@ -137,6 +142,457 @@ class GatewayService:
 
     def add_exit(self, link: str) -> dict:
         return self.add_outbound(parse_link(link))
+
+    def _subscription_meta(self) -> dict:
+        try:
+            value = json.loads(Path(self.subscription_meta_path).read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+
+    def _save_subscription_meta(self, value: dict) -> None:
+        path = Path(self.subscription_meta_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".pdg-subscriptions-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(value, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    @staticmethod
+    def _subscription_url(url: str) -> str:
+        url = url.strip()
+        if len(url) > 4096 or any(ord(character) < 32 for character in url):
+            raise ServiceError("节点订阅 URL 格式不正确")
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.hostname or "").lower()
+            parsed.port
+        except ValueError as error:
+            raise ServiceError("节点订阅 URL 格式不正确") from error
+        if parsed.scheme not in ("http", "https") or not host:
+            raise ServiceError("节点订阅 URL 只支持 http/https")
+        if host == "localhost" or host.endswith(".localhost"):
+            raise ServiceError("节点订阅 URL 不允许本机地址")
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+        if address and (address.is_private or address.is_loopback or address.is_link_local
+                        or address.is_multicast or address.is_reserved or address.is_unspecified):
+            raise ServiceError("节点订阅 URL 不允许私有或保留地址")
+        return url
+
+    @staticmethod
+    def _require_public_subscription_host(url: str) -> None:
+        parsed = urllib.parse.urlparse(url)
+        try:
+            addresses = {
+                item[4][0] for item in socket.getaddrinfo(
+                    parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM,
+                )
+            }
+        except OSError as error:
+            raise ServiceError("节点订阅域名解析失败") from error
+        if not addresses:
+            raise ServiceError("节点订阅域名没有可用地址")
+        for value in addresses:
+            address = ipaddress.ip_address(value)
+            if (address.is_private or address.is_loopback or address.is_link_local
+                    or address.is_multicast or address.is_reserved or address.is_unspecified):
+                raise ServiceError("节点订阅域名解析到私有或保留地址")
+
+    @staticmethod
+    def _masked_subscription_url(url: str) -> str:
+        parsed = urllib.parse.urlparse(url)
+        host = parsed.hostname or "?"
+        port = f":{parsed.port}" if parsed.port else ""
+        path = parsed.path or "/"
+        return urllib.parse.urlunparse((parsed.scheme, host + port, path, "", "***" if parsed.query else "", ""))
+
+    @staticmethod
+    def _subscription_id(url: str) -> str:
+        return "sub_" + hashlib.sha1(url.encode()).hexdigest()[:8]
+
+    @staticmethod
+    def _subscription_regex(value: str, label: str) -> re.Pattern | None:
+        value = value.strip()
+        if not value:
+            return None
+        if len(value) > 200:
+            raise ServiceError(f"{label}正则过长")
+        try:
+            return re.compile(value, re.I)
+        except re.error as error:
+            raise ServiceError(f"{label}正则无效: {error}") from error
+
+    def _fetch_subscription(self, url: str) -> bytes:
+        self._require_public_subscription_host(url)
+        request = urllib.request.Request(url, headers={"User-Agent": "privdns-gateway-subscription"})
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                final_url = self._subscription_url(response.geturl())
+                self._require_public_subscription_host(final_url)
+                data = response.read(8 * 1024 * 1024 + 1)
+        except ServiceError:
+            raise
+        except Exception as error:
+            raise ServiceError("节点订阅下载失败") from error
+        if not data:
+            raise ServiceError("节点订阅响应为空")
+        if len(data) > 8 * 1024 * 1024:
+            raise ServiceError("节点订阅超过 8MB 限制")
+        return data
+
+    @staticmethod
+    def _subscription_tag(identifier: str, outbound: dict, used: dict[str, str]) -> str:
+        original = normalize_tag(str(outbound.get("tag", "node")))
+        digest_source = {key: value for key, value in outbound.items() if key != "tag"}
+        digest = hashlib.sha1(json.dumps(digest_source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        base = normalize_tag(f"{identifier}-{original}")[:40]
+        if base not in used:
+            used[base] = digest
+            return base
+        if used[base] == digest:
+            return base
+        tag = base[:33] + "-" + digest[:6]
+        suffix = 1
+        while tag in used and used[tag] != digest:
+            tail = f"-{suffix}"
+            tag = (base[:40 - len(tail)] + tail)
+            suffix += 1
+        used[tag] = digest
+        return tag
+
+    def _normalize_categories(self, categories: list[dict] | None) -> list[dict]:
+        if categories in (None, []):
+            return []
+        if not isinstance(categories, list) or len(categories) > 12:
+            raise ServiceError("节点分类必须是数组且最多 12 项")
+        output, names = [], set()
+        for item in categories:
+            if not isinstance(item, dict):
+                raise ServiceError("节点分类格式错误")
+            name = str(item.get("name", "")).strip()[:30]
+            pattern = str(item.get("pattern", "")).strip()
+            if not name or not pattern:
+                raise ServiceError("节点分类名称和正则不能为空")
+            normalized = name.casefold()
+            if normalized in names:
+                raise ServiceError(f"节点分类名称重复: {name}")
+            self._subscription_regex(pattern, f"分类 {name} ")
+            names.add(normalized)
+            output.append({"name": name, "pattern": pattern})
+        return output
+
+    def _subscription_groups(
+        self, identifier: str, master_tag: str, outbounds: list[dict], named_tags: list[tuple[str, str]],
+        categories: list[dict] | None,
+    ) -> list[dict]:
+        groups = [{
+            "tag": master_tag, "label": "全部节点",
+            "members": [item["tag"] for item in outbounds], "count": len(outbounds), "master": True,
+        }]
+        occupied = {master_tag, *(item["tag"] for item in outbounds)}
+        for category in self._normalize_categories(categories):
+            category_hash = hashlib.sha1(category["name"].encode()).hexdigest()[:8]
+            tag = normalize_tag(f"{identifier}-cat-{category_hash}")[:40]
+            if tag in occupied:
+                raise ServiceError(f"节点分类组名称冲突: {category['name']}")
+            occupied.add(tag)
+            matcher = self._subscription_regex(category["pattern"], f"分类 {category['name']} ")
+            members = [node_tag for original, node_tag in named_tags if matcher and matcher.search(original)]
+            groups.append({
+                "tag": tag, "label": category["name"], "members": members,
+                "count": len(members), "master": False,
+            })
+        return groups
+
+    def _prepare_subscription(
+        self,
+        url: str,
+        label: str = "",
+        include: str = "",
+        exclude: str = "",
+        group: str = "",
+        identifier: str | None = None,
+        categories: list[dict] | None = None,
+    ) -> dict:
+        url = self._subscription_url(url)
+        identifier = identifier or self._subscription_id(url)
+        include_re = self._subscription_regex(include, "包含")
+        exclude_re = self._subscription_regex(exclude, "排除")
+        try:
+            parsed, errors = parse_subscription(self._fetch_subscription(url))
+        except ValueError as error:
+            raise ServiceError(str(error)) from error
+        if len(parsed) > 500:
+            raise ServiceError("单个订阅最多允许 500 个节点")
+
+        selected = []
+        for outbound in parsed:
+            name = str(outbound.get("tag", ""))
+            if include_re and not include_re.search(name):
+                continue
+            if exclude_re and exclude_re.search(name):
+                continue
+            selected.append((outbound, name))
+        if not selected:
+            raise ServiceError("订阅过滤后没有可用节点，未修改现有配置")
+
+        used, outbounds, named_tags = {}, [], []
+        for outbound, original_name in selected:
+            value = json.loads(json.dumps(outbound))
+            tag = self._subscription_tag(identifier, value, used)
+            if any(item.get("tag") == tag for item in outbounds):
+                continue
+            value["tag"] = tag
+            outbounds.append(value)
+            named_tags.append((original_name, tag))
+        if not outbounds:
+            raise ServiceError("订阅没有可应用的唯一节点")
+
+        clean_label = label.strip()[:40] or urllib.parse.urlparse(url).hostname or identifier
+        group_tag = normalize_tag(group.strip()) if group.strip() else normalize_tag(identifier + "-auto")
+        if not re.search(r"[A-Za-z0-9]", group_tag):
+            raise ServiceError("订阅分类组名称必须包含字母或数字")
+        if group_tag in {item["tag"] for item in outbounds}:
+            raise ServiceError("订阅分类组名称与节点冲突")
+
+        meta = self._subscription_meta()
+        previous = meta.get(identifier, {})
+        old_nodes = set(previous.get("nodes", []))
+        current = {item.get("tag"): item for item in self.control.load().get("outbounds", [])}
+        new_nodes = {item["tag"]: item for item in outbounds}
+        added = sorted(tag for tag in new_nodes if tag not in current)
+        updated = sorted(tag for tag, item in new_nodes.items() if tag in current and current[tag] != item)
+        removed = sorted(old_nodes - set(new_nodes))
+        previews = [{
+            "tag": item["tag"], "type": item.get("type"),
+            "server": self._mask_host(item.get("server")), "server_port": item.get("server_port"),
+        } for item in outbounds[:30]]
+        return {
+            "id": identifier, "url": url, "url_display": self._masked_subscription_url(url),
+            "label": clean_label, "include": include.strip(), "exclude": exclude.strip(),
+            "group": group_tag, "outbounds": outbounds, "nodes": previews,
+            "count": len(outbounds), "skipped": len(errors) + len(parsed) - len(selected),
+            "added": added, "updated": updated, "removed": removed,
+            "groups": self._subscription_groups(identifier, group_tag, outbounds, named_tags, categories),
+            "category_input": self._normalize_categories(categories),
+        }
+
+    @staticmethod
+    def _public_subscription(identifier: str, info: dict) -> dict:
+        url = str(info.get("url", ""))
+        parsed = urllib.parse.urlparse(url)
+        masked = GatewayService._masked_subscription_url(url) if parsed.scheme else ""
+        return {
+            "id": identifier, "label": info.get("label") or identifier,
+            "url": masked, "has_secret": bool(parsed.query or parsed.username or parsed.password or parsed.fragment),
+            "include": info.get("include", ""), "exclude": info.get("exclude", ""),
+            "group": info.get("group"), "groups": info.get("groups", []),
+            "categories": info.get("categories", []), "count": int(info.get("count", 0)),
+            "skipped": int(info.get("skipped", 0)), "updated_at": info.get("updated_at"),
+        }
+
+    def list_subscriptions(self) -> list[dict]:
+        return [
+            self._public_subscription(identifier, info)
+            for identifier, info in sorted(self._subscription_meta().items(), key=lambda item: str(item[1].get("label", item[0])).lower())
+        ]
+
+    def preview_subscription(
+        self, url: str, label: str = "", include: str = "", exclude: str = "",
+        group: str = "", identifier: str | None = None, categories: list[dict] | None = None,
+    ) -> dict:
+        prepared = self._prepare_subscription(url, label, include, exclude, group, identifier, categories)
+        result = {key: value for key, value in prepared.items() if key not in {"url", "outbounds", "category_input"}}
+        result["categories"] = prepared["category_input"]
+        return result
+
+    def save_subscription(
+        self, url: str, label: str = "", include: str = "", exclude: str = "",
+        group: str = "", identifier: str | None = None, categories: list[dict] | None = None,
+    ) -> dict:
+        with self._metadata_lock:
+            meta = self._subscription_meta()
+            if identifier and identifier not in meta:
+                raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
+            previous = meta.get(identifier or self._subscription_id(url), {})
+            prepared = self._prepare_subscription(url, label, include, exclude, group, identifier, categories)
+            identifier = prepared["id"]
+            old_nodes = set(previous.get("nodes", []))
+            old_groups = {item.get("tag") for item in previous.get("groups", []) if item.get("tag")}
+            if previous.get("group"):
+                old_groups.add(previous["group"])
+            new_nodes = {item["tag"] for item in prepared["outbounds"]}
+            group_specs = [item for item in prepared["groups"] if item["members"]]
+            new_group = prepared["group"]
+            new_groups = {item["tag"] for item in group_specs}
+            old_owned = old_nodes | old_groups
+            new_owned = new_nodes | new_groups
+
+            def modify(config):
+                occupied = {
+                    item.get("tag") for item in config.get("outbounds", [])
+                    if item.get("tag") not in old_owned
+                }
+                conflicts = sorted(new_owned & occupied)
+                if conflicts:
+                    raise ValueError("订阅标签与现有出口冲突: " + ", ".join(conflicts))
+                config["outbounds"] = [
+                    item for item in config.get("outbounds", []) if item.get("tag") not in old_owned
+                ]
+                config["outbounds"].extend(prepared["outbounds"])
+                config["outbounds"].extend({
+                    "type": "urltest", "tag": spec["tag"], "outbounds": spec["members"],
+                    "url": "http://www.gstatic.com/generate_204", "interval": "3m", "tolerance": 50,
+                } for spec in group_specs)
+                removed = old_owned - new_owned
+                route = config.setdefault("route", {})
+                if route.get("final") in removed:
+                    route["final"] = new_group
+                for rule in route.setdefault("rules", []):
+                    if rule.get("outbound") in removed:
+                        rule["outbound"] = new_group
+                empty_groups = set()
+                for outbound in config["outbounds"]:
+                    if outbound.get("detour") in removed:
+                        outbound["detour"] = new_group
+                    if outbound.get("type") == "urltest" and outbound.get("tag") != new_group:
+                        outbound["outbounds"] = [
+                            member for member in outbound.get("outbounds", []) if member not in removed
+                        ]
+                        if not outbound["outbounds"]:
+                            empty_groups.add(outbound.get("tag"))
+                if empty_groups:
+                    broken = removed | empty_groups
+                    config["outbounds"] = [
+                        item for item in config["outbounds"] if item.get("tag") not in empty_groups
+                    ]
+                    for outbound in config["outbounds"]:
+                        if outbound.get("detour") in broken:
+                            outbound["detour"] = new_group
+                        if outbound.get("type") == "urltest" and outbound.get("tag") != new_group:
+                            outbound["outbounds"] = [
+                                member for member in outbound.get("outbounds", []) if member not in broken
+                            ]
+                    for rule in route["rules"]:
+                        if rule.get("outbound") in empty_groups:
+                            rule["outbound"] = new_group
+                    if route.get("final") in empty_groups:
+                        route["final"] = new_group
+
+            self._check_result(self.control.apply(modify))
+            now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            meta = self._subscription_meta()
+            meta[identifier] = {
+                "url": prepared["url"], "label": prepared["label"],
+                "include": prepared["include"], "exclude": prepared["exclude"],
+                "group": new_group,
+                "groups": [{"tag": item["tag"], "label": item["label"], "count": item["count"]} for item in group_specs],
+                "categories": prepared["category_input"], "nodes": sorted(new_nodes),
+                "count": prepared["count"], "skipped": prepared["skipped"],
+                "created_at": previous.get("created_at") or now, "updated_at": now,
+            }
+            self._save_subscription_meta(meta)
+        return self._public_subscription(identifier, meta[identifier])
+
+    def preview_subscription_update(self, identifier: str, **changes) -> dict:
+        info = self._subscription_meta().get(identifier)
+        if not info:
+            raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
+        prepared = self._prepare_subscription(
+            str(changes.get("url") or info.get("url", "")),
+            str(changes["label"]) if "label" in changes else str(info.get("label", "")),
+            str(changes["include"]) if "include" in changes else str(info.get("include", "")),
+            str(changes["exclude"]) if "exclude" in changes else str(info.get("exclude", "")),
+            str(changes["group"]) if "group" in changes else str(info.get("group", "")),
+            identifier,
+            changes["categories"] if "categories" in changes else info.get("categories", []),
+        )
+        result = {key: value for key, value in prepared.items() if key not in {"url", "outbounds", "category_input"}}
+        result["categories"] = prepared["category_input"]
+        return result
+
+    def update_subscription(self, identifier: str, **changes) -> dict:
+        info = self._subscription_meta().get(identifier)
+        if not info:
+            raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
+        return self.save_subscription(
+            str(changes.get("url") or info.get("url", "")),
+            str(changes["label"]) if "label" in changes else str(info.get("label", "")),
+            str(changes["include"]) if "include" in changes else str(info.get("include", "")),
+            str(changes["exclude"]) if "exclude" in changes else str(info.get("exclude", "")),
+            str(changes["group"]) if "group" in changes else str(info.get("group", "")),
+            identifier,
+            changes["categories"] if "categories" in changes else info.get("categories", []),
+        )
+
+    def refresh_subscription(self, identifier: str) -> dict:
+        return self.update_subscription(identifier)
+
+    def remove_subscription(self, identifier: str) -> dict:
+        with self._metadata_lock:
+            meta = self._subscription_meta()
+            if identifier not in meta:
+                raise ServiceError(f"节点订阅 {identifier} 不存在", 404)
+            info = meta[identifier]
+            owned = set(info.get("nodes", []))
+            owned.update(item.get("tag") for item in info.get("groups", []) if item.get("tag"))
+            if info.get("group"):
+                owned.add(info["group"])
+
+            def modify(config):
+                remaining = [item for item in config.get("outbounds", []) if item.get("tag") not in owned]
+                empty_groups = set()
+                for outbound in remaining:
+                    if outbound.get("type") == "urltest":
+                        outbound["outbounds"] = [member for member in outbound.get("outbounds", []) if member not in owned]
+                        if not outbound["outbounds"]:
+                            empty_groups.add(outbound.get("tag"))
+                remaining = [item for item in remaining if item.get("tag") not in empty_groups]
+                broken = owned | empty_groups
+                for outbound in remaining:
+                    if outbound.get("type") == "urltest":
+                        outbound["outbounds"] = [member for member in outbound.get("outbounds", []) if member not in broken]
+                live = exit_tags({"outbounds": remaining})
+                if not live:
+                    raise ValueError("删除订阅后没有可用出口")
+                route = config.setdefault("route", {})
+                fallback = route.get("final") if route.get("final") in live else next(
+                    (tag for tag in ("jp", "direct") if tag in live), live[0]
+                )
+                route["final"] = fallback
+                for rule in route.setdefault("rules", []):
+                    if rule.get("outbound") in broken:
+                        rule["outbound"] = fallback
+                for outbound in remaining:
+                    if outbound.get("detour") in broken:
+                        outbound["detour"] = fallback
+                config["outbounds"] = remaining
+
+            self._check_result(self.control.apply(modify))
+            meta.pop(identifier)
+            self._save_subscription_meta(meta)
+        return {"deleted": identifier}
+
+    def refresh_subscriptions(self) -> list[dict]:
+        results = []
+        for identifier in list(self._subscription_meta()):
+            try:
+                value = self.refresh_subscription(identifier)
+                results.append({"id": identifier, "ok": True, "count": value["count"]})
+            except Exception as error:  # 定时任务逐个隔离，保留该订阅旧配置
+                results.append({"id": identifier, "ok": False, "error": str(error)[:120]})
+        return results
 
     def exit_impact(self, tag: str) -> dict:
         config = self.control.load()

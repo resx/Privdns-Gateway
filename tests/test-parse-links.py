@@ -3,6 +3,7 @@
 嵌套字段用 __ 表示层级, 如 tls__server_name → tls.server_name。"""
 import base64
 import importlib.util
+import json
 import os
 import sys
 
@@ -13,6 +14,8 @@ try:
     spec.loader.exec_module(m)
 except SystemExit:
     pass
+
+from pdg_links import parse_subscription  # noqa: E402
 
 fails = 0
 
@@ -90,6 +93,22 @@ check("socks5://", m.parse_link("socks5://user:pass@1.2.3.4:1080#SOCKS"),
 # http
 check("http://", m.parse_link("http://user:pass@1.2.3.4:8080#HTTP"),
       type="http", server="1.2.3.4", server_port=8080, username="user", password="pass")
+
+# Base64 节点订阅与 SIP008
+subscription = base64.urlsafe_b64encode(
+    b"socks5://u:p@one.example:1080#ONE\ninvalid://skip"
+).rstrip(b"=")
+nodes, skipped = parse_subscription(subscription)
+check("Base64 节点订阅", nodes[0], type="socks", server="one.example", tag="ONE")
+if len(nodes) != 1 or len(skipped) != 1:
+    print("[FAIL] Base64 订阅跳过统计", len(nodes), len(skipped)); fails += 1
+else:
+    print("[OK]   Base64 订阅跳过统计")
+sip_nodes, _ = parse_subscription(json.dumps({"servers": [{
+    "server": "sip.example", "server_port": 8388, "method": "aes-128-gcm",
+    "password": "secret", "remarks": "SIP",
+}]}).encode())
+check("SIP008 节点订阅", sip_nodes[0], type="shadowsocks", server="sip.example", tag="SIP")
 
 # 非法
 try:

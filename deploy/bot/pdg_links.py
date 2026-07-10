@@ -37,6 +37,70 @@ def parse_link(link):
     raise ValueError("支持 ss/vmess/trojan/vless/hysteria2/tuic/anytls/socks5/http 分享链接或 Surge ss 行")
 
 
+def parse_subscription(data: bytes) -> tuple[list[dict], list[str]]:
+    """解析 Base64 URI 列表、纯文本 URI 列表或 SIP008 JSON。"""
+    text = data.decode("utf-8-sig", "ignore").strip()
+    if not text:
+        raise ValueError("订阅内容为空")
+    if text.lstrip().startswith(("<html", "<!doctype")):
+        raise ValueError("订阅返回了 HTML 页面")
+
+    if text.startswith("{"):
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as error:
+            raise ValueError("订阅 JSON 格式错误") from error
+        servers = value.get("servers") if isinstance(value, dict) else None
+        if isinstance(servers, list):
+            output, errors = [], []
+            for index, item in enumerate(servers, 1):
+                try:
+                    host = str(item["server"])
+                    port = int(item.get("server_port") or item["port"])
+                    output.append({
+                        "type": "shadowsocks",
+                        "tag": normalize_tag(item.get("remarks") or item.get("tag"), host, port),
+                        "server": host,
+                        "server_port": port,
+                        "method": str(item["method"]),
+                        "password": str(item["password"]),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    errors.append(f"SIP008 第 {index} 项格式错误")
+            if output:
+                return output, errors
+            raise ValueError("SIP008 没有可用节点")
+
+    output, errors = _parse_subscription_lines(text)
+    if output:
+        return output, errors
+
+    compact = re.sub(r"\s+", "", text)
+    try:
+        decoded = _b64(compact)
+    except Exception as error:
+        raise ValueError("订阅不是支持的 URI 列表、Base64 列表或 SIP008 JSON") from error
+    output, decoded_errors = _parse_subscription_lines(decoded)
+    if not output:
+        raise ValueError("订阅中没有支持的节点")
+    return output, decoded_errors
+
+
+def _parse_subscription_lines(text: str) -> tuple[list[dict], list[str]]:
+    output, errors = [], []
+    for number, raw in enumerate(text.splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith(("#", "//")):
+            continue
+        if line in ("proxies:", "proxy-groups:") or line.startswith("proxies:"):
+            raise ValueError("暂不支持 Clash YAML 订阅，请使用 Base64/URI 列表或 SIP008")
+        try:
+            output.append(parse_link(line))
+        except Exception as error:  # 每行独立容错，错误文本不包含原始链接
+            errors.append(f"第 {number} 行: {str(error)[:80]}")
+    return output, errors
+
+
 def _b64(value):
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("utf-8", "ignore")
 

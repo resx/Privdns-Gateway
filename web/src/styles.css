@@ -121,6 +121,16 @@ button { border: 0; cursor: pointer; }
 .route-result { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr auto; gap: 4px 20px; padding-top: 16px; border-top: 1px solid var(--line); }
 .route-result strong { color: var(--accent); font-size: 1.15rem; }
 .route-result small { grid-column: 1 / -1; color: var(--muted); }
+.subscription-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.subscription-form input:first-child, .subscription-form textarea { grid-column: 1 / -1; }
+.subscription-preview { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 16px; padding: 14px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.subscription-preview span, .subscription-preview strong { display: block; }
+.subscription-preview p { grid-column: 1 / -1; margin: 0; }
+.subscription-preview .node-preview { max-height: 70px; overflow: auto; line-height: 1.6; }
+.subscription-list { display: grid; gap: 2px; }
+.subscription-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 76px; padding: 12px; border-top: 1px solid rgba(148,163,184,.1); }
+.subscription-row strong, .subscription-row small, .subscription-row span { display: block; overflow-wrap: anywhere; }
+.subscription-row small, .subscription-row span { margin-top: 4px; color: var(--muted); font-size: .76rem; }
 .ruleset-form { display: grid; grid-template-columns: minmax(240px, 2fr) 1fr minmax(130px, .7fr) auto; gap: 9px; margin-bottom: 18px; }
 .ruleset-list { display: grid; gap: 2px; }
 .ruleset-row { display: grid; grid-template-columns: minmax(180px, 1fr) 150px auto; align-items: center; gap: 12px; min-height: 68px; padding: 10px 12px; border-top: 1px solid rgba(148,163,184,.1); }
@@ -172,7 +182,8 @@ button { border: 0; cursor: pointer; }
   .text-danger { justify-self: end; }
   .route-tester { grid-template-columns: 1fr; }
   .route-result { grid-column: auto; }
-  .ruleset-form, .ruleset-row { grid-template-columns: 1fr; }
+  .subscription-form, .subscription-preview, .subscription-row, .ruleset-form, .ruleset-row { grid-template-columns: 1fr; }
+.subscription-form input:first-child, .subscription-form textarea, .subscription-preview p { grid-column: auto; }
   .row-actions { justify-content: flex-start; }
   .connection-row { grid-template-columns: minmax(0, 1fr) auto; }
   .connection-row .chain { grid-column: 1 / -1; }

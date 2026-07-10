@@ -239,6 +239,24 @@ class AdminHandler(BaseHTTPRequestHandler):
             return self.service.set_rule(str(body.get("domain", "")), str(body.get("target", "")))
         if method == "POST" and path == "/api/v1/route/test":
             return self.service.test_route(str(self._body().get("domain", "")))
+        if method == "GET" and path == "/api/v1/subscriptions":
+            return self.service.list_subscriptions()
+        if method == "POST" and path == "/api/v1/subscriptions/preview":
+            body = self._body()
+            return self.service.preview_subscription(
+                str(body.get("url", "")), str(body.get("label", "")),
+                str(body.get("include", "")), str(body.get("exclude", "")), str(body.get("group", "")),
+                categories=body.get("categories", []),
+            )
+        if method == "POST" and path == "/api/v1/subscriptions":
+            body = self._body()
+            return self.service.save_subscription(
+                str(body.get("url", "")), str(body.get("label", "")),
+                str(body.get("include", "")), str(body.get("exclude", "")), str(body.get("group", "")),
+                categories=body.get("categories", []),
+            )
+        if method == "POST" and path == "/api/v1/subscriptions/refresh":
+            return self.service.refresh_subscriptions()
         if method == "GET" and path == "/api/v1/rulesets":
             return self.service.list_rulesets()
         if method == "POST" and path == "/api/v1/rulesets":
@@ -270,6 +288,26 @@ class AdminHandler(BaseHTTPRequestHandler):
         if method == "DELETE" and path.startswith(group_prefix):
             tag = urllib.parse.unquote(path[len(group_prefix):])
             return self.service.remove_group(tag)
+
+        subscription_prefix = "/api/v1/subscriptions/"
+        if path.startswith(subscription_prefix):
+            tail = urllib.parse.unquote(path[len(subscription_prefix):])
+            if method == "POST" and tail.endswith("/refresh"):
+                identifier = tail[:-8]
+                if not identifier or "/" in identifier:
+                    raise ServiceError("节点订阅 ID 无效")
+                return self.service.refresh_subscription(identifier)
+            if method == "POST" and tail.endswith("/preview"):
+                identifier = tail[:-8]
+                if not identifier or "/" in identifier:
+                    raise ServiceError("节点订阅 ID 无效")
+                return self.service.preview_subscription_update(identifier, **self._body())
+            if not tail or "/" in tail:
+                raise ServiceError("节点订阅 ID 无效")
+            if method == "PUT":
+                return self.service.update_subscription(tail, **self._body())
+            if method == "DELETE":
+                return self.service.remove_subscription(tail)
 
         ruleset_prefix = "/api/v1/rulesets/"
         if path.startswith(ruleset_prefix):

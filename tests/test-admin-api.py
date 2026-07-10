@@ -37,6 +37,18 @@ class FakeService:
     def set_rule(self, domain, target): self.calls.append(("rule", domain, target)); return {"domain": domain}
     def remove_rule(self, domain): self.calls.append(("del-rule", domain)); return {"deleted": domain}
     def test_route(self, domain): self.calls.append(("test-route", domain)); return {"target": "jp"}
+    def list_subscriptions(self): return [{"id": "sub_one", "label": "机场 A", "count": 2}]
+    def preview_subscription(self, url, label, include, exclude, group, categories=None):
+        self.calls.append(("preview-sub", url, label, include, exclude, group, categories)); return {"id": "sub_one", "count": 2}
+    def save_subscription(self, url, label, include, exclude, group, categories=None):
+        self.calls.append(("save-sub", url, label, include, exclude, group, categories)); return {"id": "sub_one", "count": 2}
+    def preview_subscription_update(self, identifier, **changes):
+        self.calls.append(("preview-put-sub", identifier, changes)); return {"id": identifier, **changes}
+    def update_subscription(self, identifier, **changes):
+        self.calls.append(("put-sub", identifier, changes)); return {"id": identifier, **changes}
+    def refresh_subscription(self, identifier): self.calls.append(("refresh-sub", identifier)); return {"id": identifier}
+    def refresh_subscriptions(self): self.calls.append(("refresh-subs",)); return [{"id": "sub_one", "ok": True}]
+    def remove_subscription(self, identifier): self.calls.append(("del-sub", identifier)); return {"deleted": identifier}
     def list_rulesets(self): return [{"tag": "rs_one"}]
     def save_ruleset(self, url, target, label): self.calls.append(("ruleset", url, target, label)); return {"tag": "rs_one"}
     def update_ruleset(self, tag, target, label): self.calls.append(("put-ruleset", tag, target, label)); return {"tag": tag}
@@ -128,6 +140,25 @@ with tempfile.TemporaryDirectory() as directory:
         assert status == 200 and service.calls[-1] == ("group", "auto", ["hk", "tw"])
         status, _, _ = request(port, "POST", "/api/v1/route/test", token, {"domain": "x.test"})
         assert status == 200 and service.calls[-1] == ("test-route", "x.test")
+        status, _, payload = request(port, "GET", "/api/v1/subscriptions", token)
+        assert status == 200 and json.loads(payload)["data"][0]["id"] == "sub_one"
+        status, _, _ = request(port, "POST", "/api/v1/subscriptions/preview", token,
+                               {"url": "https://sub.example/x", "label": "A", "include": "HK",
+                                "categories": [{"name": "香港", "pattern": "HK"}]})
+        assert status == 200 and service.calls[-1][0] == "preview-sub"
+        assert service.calls[-1][-1] == [{"name": "香港", "pattern": "HK"}]
+        status, _, _ = request(port, "POST", "/api/v1/subscriptions", token,
+                               {"url": "https://sub.example/x", "label": "A", "group": "airport-a"})
+        assert status == 200 and service.calls[-1][0] == "save-sub"
+        status, _, _ = request(port, "POST", "/api/v1/subscriptions/sub_one/preview", token, {"exclude": "expired"})
+        assert status == 200 and service.calls[-1] == ("preview-put-sub", "sub_one", {"exclude": "expired"})
+        status, _, _ = request(port, "PUT", "/api/v1/subscriptions/sub_one", token, {"exclude": "expired"})
+        assert status == 200 and service.calls[-1] == ("put-sub", "sub_one", {"exclude": "expired"})
+        status, _, _ = request(port, "POST", "/api/v1/subscriptions/sub_one/refresh", token, {})
+        assert status == 200 and service.calls[-1] == ("refresh-sub", "sub_one")
+        status, _, _ = request(port, "DELETE", "/api/v1/subscriptions/sub_one", token)
+        assert status == 200 and service.calls[-1] == ("del-sub", "sub_one")
+
         status, _, _ = request(port, "POST", "/api/v1/rulesets", token,
                                {"url": "https://x/r.list", "target": "jp", "label": "R"})
         assert status == 200 and service.calls[-1][0] == "ruleset"

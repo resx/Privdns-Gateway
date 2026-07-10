@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """管理业务服务的出口与分流 CRUD 回归。"""
+import base64
 import json
 import subprocess
 import sys
@@ -31,6 +32,7 @@ with tempfile.TemporaryDirectory() as directory:
     config_path = root / "config.json"
     direct_path = root / "custom_direct.txt"
     meta_path = root / "rulesets.json"
+    subscription_path = root / "subscriptions.json"
     config = {
         "outbounds": [
             {"type": "direct", "tag": "jp"},
@@ -56,7 +58,10 @@ with tempfile.TemporaryDirectory() as directory:
 
     runner = Runner()
     control = SingBoxControl(str(config_path), str(root / "pdg.lock"), runner=runner, sleeper=lambda _: None)
-    service = GatewayService(control, str(direct_path), str(meta_path), ruleset_dir=str(root / "rs"))
+    service = GatewayService(
+        control, str(direct_path), str(meta_path), ruleset_dir=str(root / "rs"),
+        subscription_meta_path=str(subscription_path),
+    )
 
     overview = service.overview()
     assert overview["default_exit"] == "hk" and overview["proxy_count"] == 1
@@ -86,6 +91,57 @@ with tempfile.TemporaryDirectory() as directory:
     except ServiceError as error:
         assert "两个" in str(error)
     assert any(item["tag"] == "fallback" and item["members"] == ["hk", "new"] for item in service.list_exits())
+
+    subscription_text = "\n".join([
+        "socks5://user:pass@sub-hk.example.com:1080#HK-01",
+        "socks5://user:pass@sub-tw.example.com:1080#TW-01",
+        "unsupported://ignored",
+    ])
+    subscription_data = base64.urlsafe_b64encode(subscription_text.encode()).rstrip(b"=")
+    service._fetch_subscription = lambda url: subscription_data
+    try:
+        service.preview_subscription("http://127.0.0.1/nodes")
+        raise AssertionError("private subscription URL should fail")
+    except ServiceError as error:
+        assert "私有" in str(error)
+    unchanged = config_path.read_bytes()
+    try:
+        service.preview_subscription("https://subscribe.example/nodes", include="NO-MATCH")
+        raise AssertionError("empty filtered subscription should fail")
+    except ServiceError as error:
+        assert "没有可用节点" in str(error)
+    assert config_path.read_bytes() == unchanged
+    subscription_url = "https://subscribe.example/nodes?token=top-secret"
+    categories = [{"name": "香港", "pattern": "HK|香港"}, {"name": "台湾", "pattern": "TW|台湾"}]
+    sub_preview = service.preview_subscription(subscription_url, "机场 A", categories=categories)
+    assert sub_preview["count"] == 2 and sub_preview["skipped"] == 1
+    assert [group["count"] for group in sub_preview["groups"]] == [2, 1, 1]
+    assert "top-secret" not in json.dumps(sub_preview, ensure_ascii=False)
+    saved_sub = service.save_subscription(subscription_url, "机场 A", categories=categories)
+    assert saved_sub["count"] == 2 and saved_sub["has_secret"]
+    assert "top-secret" not in json.dumps(service.list_subscriptions(), ensure_ascii=False)
+    sub_meta = json.loads(subscription_path.read_text(encoding="utf-8"))[saved_sub["id"]]
+    old_nodes = sub_meta["nodes"]
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    assert len(sub_meta["groups"]) == 3
+    assert all(any(item.get("tag") == group["tag"] for item in current["outbounds"]) for group in sub_meta["groups"])
+    current["route"]["rules"].append({"domain_suffix": ["owned.example"], "outbound": old_nodes[-1]})
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+
+    service._fetch_subscription = lambda url: base64.urlsafe_b64encode(
+        b"socks5://user:newpass@sub-hk.example.com:1080#HK-01"
+    ).rstrip(b"=")
+    refreshed_sub = service.refresh_subscription(saved_sub["id"])
+    assert refreshed_sub["count"] == 1
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    assert all(rule.get("outbound") != old_nodes[-1] for rule in current["route"]["rules"])
+    assert any(rule.get("outbound") == sub_meta["group"] for rule in current["route"]["rules"])
+    service.set_final(sub_meta["group"])
+    assert service.remove_subscription(saved_sub["id"])["deleted"] == saved_sub["id"]
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    assert current["route"]["final"] != sub_meta["group"]
+    removed_tags = set(old_nodes + [group["tag"] for group in sub_meta["groups"]])
+    assert all(item.get("tag") not in removed_tags for item in current["outbounds"])
 
     # 新域名规则应排在 GMS/reject 系统规则之后，且同域名更新时不重复。
     service.set_rule("video.example", "new")
