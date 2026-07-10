@@ -216,31 +216,12 @@ def apply_sb(modify):
 
 # ── 故障切换组 (urltest) ──
 def add_group(name, members):
-    c = load(); cands = concrete_tags(c)
-    members = [m for m in members if m]
-    name = _tag(name, "", "")
-    if name in cands:
-        return False, f"组名 {name} 和现有出口冲突, 换个名字"
-    bad = [m for m in members if m not in cands]
-    if bad:
-        return False, f"未知成员: {', '.join(bad)}\n只能用具体出口: {', '.join(cands)}"
-    if len(members) < 2:
-        return False, "故障切换组至少要 2 个出口"
-    def mod(cc):
-        for o in cc["outbounds"]:           # 已存在则原地改成员(保留在列表中的位置)
-            if o.get("tag") == name and o.get("type") in GROUP_TYPES:
-                o["outbounds"] = members
-                if o.get("type") == "selector":
-                    if o.get("default") not in members:
-                        o["default"] = members[0]
-                else:
-                    o.setdefault("url", DELAY_URL); o.setdefault("interval", "3m"); o.setdefault("tolerance", 50)
-                return
-        cc["outbounds"].append({"type": "urltest", "tag": name, "outbounds": members,
-                                "url": DELAY_URL, "interval": "3m", "tolerance": 50})
-    ok, msg = apply_sb(mod)
-    return ok, (f"✅ 故障切换组 <b>{name}</b> = {' › '.join(members)}\n"
-                "自动选最快, 成员故障自动切换。可在「🎯 设默认出口」或分流规则里选它。" if ok else msg)
+    try:
+        result = _gateway.save_group(name, members)
+        return True, (f"✅ 故障切换组 <b>{result['tag']}</b> = {' › '.join(result['members'])}\n"
+                      "自动选最快, 成员故障自动切换。可在「🎯 设默认出口」或分流规则里选它。")
+    except ServiceError as error:
+        return False, str(error)
 
 # ── 直连表 (mosdns) ──
 def _read_direct():

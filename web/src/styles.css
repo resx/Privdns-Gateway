@@ -155,6 +155,15 @@ button { border: 0; cursor: pointer; }
 .connection-row > div:first-child span { display: block; margin-top: 5px; color: var(--muted); font-size: .75rem; }
 .connection-row .chain { color: #bdcbe0; font-size: .8rem; }
 .connection-row .bytes { color: var(--muted); font-size: .74rem; line-height: 1.5; text-align: right; }
+.preset-panel { position: relative; }
+.preset-intro { max-width: 820px; margin: -8px 0 18px; color: var(--muted); font-size: .82rem; line-height: 1.6; }
+.preset-target { display: grid; grid-template-columns: 110px minmax(220px, 420px); align-items: center; gap: 10px; margin-bottom: 18px; }
+.preset-target select { height: 42px; }
+.preset-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.preset-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; min-height: 92px; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: rgba(9, 11, 13, .58); }
+.preset-card strong { color: #edf6ff; }
+.preset-card p { margin: 6px 0 0; color: var(--muted); font-size: .76rem; line-height: 1.5; }
+.ruleset-presets .preset-card:last-child { grid-column: 1 / -1; }
 .resource-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 16px; }
 .resource-card { padding: 23px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
 .resource-card.attention { border-color: rgba(246,200,107,.42); }
@@ -206,12 +215,16 @@ button { border: 0; cursor: pointer; }
   .text-danger { justify-self: end; }
   .route-tester { grid-template-columns: 1fr; }
   .route-result { grid-column: auto; }
-  .subscription-form, .subscription-preview, .subscription-row, .ruleset-form, .ruleset-row, .resource-grid { grid-template-columns: 1fr; }
+  .subscription-form, .subscription-preview, .subscription-row, .ruleset-form, .ruleset-row, .resource-grid, .preset-grid { grid-template-columns: 1fr; }
   .subscription-form > input:first-child, .subscription-form > textarea, .subscription-preview p { grid-column: auto; }
   .override-box { grid-column: auto; }
   .override-options { grid-template-columns: 1fr; align-items: stretch; }
   .resource-list > div { grid-template-columns: 65px 1fr; padding: 9px 0; }
   .resource-list em { grid-column: 2; }
+  .preset-target { grid-template-columns: 1fr; }
+  .preset-card { grid-template-columns: 1fr; }
+  .preset-card button { width: 100%; }
+  .ruleset-presets .preset-card:last-child { grid-column: auto; }
   .row-actions { justify-content: flex-start; }
   .connection-row { grid-template-columns: minmax(0, 1fr) auto; }
   .connection-row .chain { grid-column: 1 / -1; }

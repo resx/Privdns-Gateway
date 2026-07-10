@@ -14,6 +14,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -346,6 +347,26 @@ class GatewayService:
             output.append({"name": name, "pattern": pattern})
         return output
 
+    @staticmethod
+    def _group_tag(value: str, fallback: str = "") -> str:
+        value = unicodedata.normalize("NFKC", value.strip() or fallback.strip())
+        output = []
+        for character in value:
+            if character.isalnum() or character in "_.-":
+                output.append(character)
+            elif character.isspace():
+                output.append("-")
+            elif unicodedata.category(character).startswith("M") and output:
+                output.append(character)
+            else:
+                output.append("-")
+        tag = re.sub(r"-+", "-", "".join(output)).strip("-.")
+        if not tag:
+            raise ServiceError("节点组名称必须包含文字或数字")
+        while len(tag.encode("utf-8")) > 64:
+            tag = tag[:-1]
+        return tag
+
     def _subscription_groups(
         self, identifier: str, master_tag: str, outbounds: list[dict], named_tags: list[tuple[str, str]],
         categories: list[dict] | None,
@@ -442,9 +463,7 @@ class GatewayService:
             raise ServiceError("订阅没有可应用的唯一节点")
 
         clean_label = label.strip()[:40] or urllib.parse.urlparse(url).hostname or identifier
-        group_tag = normalize_tag(group.strip()) if group.strip() else normalize_tag(identifier + "-auto")
-        if not re.search(r"[A-Za-z0-9]", group_tag):
-            raise ServiceError("订阅分类组名称必须包含字母或数字")
+        group_tag = self._group_tag(group, identifier + "-auto")
         if group_tag in {item["tag"] for item in outbounds}:
             raise ServiceError("订阅分类组名称与节点冲突")
 
@@ -737,9 +756,7 @@ class GatewayService:
         raw_name = name.strip()
         if not raw_name:
             raise ServiceError("故障组名称不能为空")
-        name = normalize_tag(raw_name)
-        if not re.search(r"[A-Za-z0-9]", name):
-            raise ServiceError("故障组名称必须包含字母或数字")
+        name = self._group_tag(raw_name)
         if not isinstance(members, list):
             raise ServiceError("故障组成员必须是数组")
         members = list(dict.fromkeys(str(member).strip() for member in members if str(member).strip()))

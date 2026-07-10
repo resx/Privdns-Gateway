@@ -83,22 +83,22 @@ with tempfile.TemporaryDirectory() as directory:
     service.set_final("new")
     assert service.overview()["default_exit"] == "new"
 
-    group = service.save_group("fallback", ["hk", "new"])
-    assert group == {"tag": "fallback", "members": ["hk", "new"], "mode": "auto", "selected": None}
-    assert service.set_group_selection("fallback", "new") == {
-        "tag": "fallback", "mode": "manual", "selected": "new",
+    group = service.save_group("自动优选_日本", ["hk", "new"])
+    assert group == {"tag": "自动优选_日本", "members": ["hk", "new"], "mode": "auto", "selected": None}
+    assert service.set_group_selection("自动优选_日本", "new") == {
+        "tag": "自动优选_日本", "mode": "manual", "selected": "new",
     }
     current = json.loads(config_path.read_text(encoding="utf-8"))
-    fixed_group = next(item for item in current["outbounds"] if item.get("tag") == "fallback")
+    fixed_group = next(item for item in current["outbounds"] if item.get("tag") == "自动优选_日本")
     assert fixed_group["type"] == "selector" and fixed_group["default"] == "new"
-    service.save_group("fallback", ["hk", "new"])
-    assert service.set_group_selection("fallback", None)["mode"] == "auto"
+    service.save_group("自动优选_日本", ["hk", "new"])
+    assert service.set_group_selection("自动优选_日本", None)["mode"] == "auto"
     try:
         service.save_group("bad", ["hk"])
         raise AssertionError("single-member group should fail")
     except ServiceError as error:
         assert "两个" in str(error)
-    assert any(item["tag"] == "fallback" and item["members"] == ["hk", "new"] for item in service.list_exits())
+    assert any(item["tag"] == "自动优选_日本" and item["members"] == ["hk", "new"] for item in service.list_exits())
 
     subscription_text = "\n".join([
         "socks5://user:pass@sub-hk.example.com:1080#HK-01",
@@ -223,7 +223,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     assert service.remove_ruleset(ruleset["tag"])["deleted"] == ruleset["tag"]
     assert all(item["tag"] != ruleset["tag"] for item in service.list_rulesets())
-    service.remove_group("fallback")
+    service.remove_group("自动优选_日本")
 
     impact = service.exit_impact("hk")
     assert impact["groups"] == ["auto"] and impact["rules"]

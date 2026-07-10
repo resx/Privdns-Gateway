@@ -107,6 +107,22 @@ interface Resources {
   geosite: { available: boolean; updated_at: string | null; files: number }
   project: { current: string; latest: string | null; update_available: boolean }
 }
+interface OverridePreset {
+  id: string
+  name: string
+  description: string
+  include?: string
+  exclude?: string
+  categories?: string
+  sort?: 'source' | 'name'
+  tcpFastOpen?: boolean
+  udpFragment?: boolean
+}
+interface RulesetPreset {
+  name: string
+  description: string
+  url: string
+}
 interface RouteResult {
   domain: string
   target: string
@@ -184,6 +200,8 @@ const testTarget = ref('google')
 const resources = ref<Resources | null>(null)
 const resourceBusy = ref('')
 const subscriptionPreviewInput = ref('')
+const presetSubscriptionId = ref('')
+const presetRulesetTarget = ref('')
 
 const concreteExits = computed(() => exits.value.filter(item => !item.members.length))
 
@@ -202,6 +220,33 @@ const navItems = [
   { id: 'system' as Page, label: '系统', icon: Settings },
 ]
 const protocolOptions = ['shadowsocks', 'vmess', 'trojan', 'vless', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'shadowtls', 'socks', 'http']
+const overridePresets: OverridePreset[] = [
+  {
+    id: 'cleanup', name: '清理套餐信息', description: '过滤剩余流量、到期时间、官网和套餐说明等伪节点。',
+    exclude: '剩余|流量|到期|过期|官网|套餐|Traffic|Expire|官网地址',
+  },
+  {
+    id: 'regions', name: '常用地区分组', description: '自动生成香港、台湾、日本、新加坡、美国五个节点组。',
+    categories: '香港=香港|港|HK|Hong Kong\n台湾=台湾|台|TW|Taiwan\n日本=日本|日|JP|Japan\n新加坡=新加坡|狮城|SG|Singapore\n美国=美国|美|US|United States',
+  },
+  {
+    id: 'sort', name: '名称整理', description: '按节点名称排序，刷新订阅后顺序保持稳定。', sort: 'name',
+  },
+  {
+    id: 'network', name: '网络优化', description: '开启 TCP Fast Open 和 UDP 分片；AnyTLS 会自动跳过不兼容的 TFO。',
+    tcpFastOpen: true, udpFragment: true,
+  },
+]
+const rulesetPresets: RulesetPreset[] = [
+  { name: 'OpenAI', description: 'ChatGPT、OpenAI API 与相关域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/OpenAI/OpenAI.list' },
+  { name: 'Telegram', description: 'Telegram 域名与 IP 网段', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Telegram/Telegram.list' },
+  { name: 'Netflix', description: 'Netflix 域名与流媒体 IP 网段', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Netflix/Netflix.list' },
+  { name: 'YouTube', description: 'YouTube 与 Google Video 相关域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/YouTube/YouTube.list' },
+  { name: 'GitHub', description: 'GitHub、GitHub API 与静态资源域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/GitHub/GitHub.list' },
+  { name: 'Apple 服务', description: 'Apple 中国区服务域名', url: 'https://raw.githubusercontent.com/DustinWin/ruleset_geodata/sing-box-ruleset/apple-cn.srs' },
+  { name: 'Microsoft 服务', description: 'Microsoft 中国区服务域名', url: 'https://raw.githubusercontent.com/DustinWin/ruleset_geodata/sing-box-ruleset/microsoft-cn.srs' },
+  { name: '游戏平台', description: '常用游戏平台及游戏下载域名', url: 'https://raw.githubusercontent.com/DustinWin/ruleset_geodata/sing-box-ruleset/games.srs' },
+]
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -249,6 +294,8 @@ async function loadAll() {
     subscriptions.value = subscriptionList
     if (!exits.value.some(item => item.tag === ruleTarget.value)) ruleTarget.value = 'direct'
     if (!exits.value.some(item => item.tag === rulesetTarget.value)) rulesetTarget.value = exits.value[0]?.tag || 'direct'
+    if (!subscriptions.value.some(item => item.id === presetSubscriptionId.value)) presetSubscriptionId.value = subscriptions.value[0]?.id || ''
+    if (!exits.value.some(item => item.tag === presetRulesetTarget.value)) presetRulesetTarget.value = overview.value?.default_exit || exits.value[0]?.tag || 'direct'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
@@ -652,6 +699,53 @@ async function loadResources() {
   }
 }
 
+async function applyOverridePreset(preset: OverridePreset) {
+  const subscription = subscriptions.value.find(item => item.id === presetSubscriptionId.value)
+  if (!subscription) {
+    error.value = '请先添加并选择一个节点订阅'
+    return
+  }
+  editSubscription(subscription)
+  if (preset.include) subscriptionInclude.value = preset.include
+  if (preset.exclude) {
+    subscriptionExclude.value = subscriptionExclude.value
+      ? `(?:${subscriptionExclude.value})|(?:${preset.exclude})`
+      : preset.exclude
+  }
+  if (preset.categories) {
+    const currentNames = new Set(categoryRules().map(item => item.name))
+    const additions = preset.categories.split('\n').filter(line => !currentNames.has(line.split('=', 1)[0]))
+    subscriptionCategories.value = [subscriptionCategories.value, ...additions].filter(Boolean).join('\n')
+  }
+  if (preset.sort) subscriptionSort.value = preset.sort
+  if (preset.tcpFastOpen) subscriptionTfo.value = true
+  if (preset.udpFragment) subscriptionUdpFragment.value = true
+  page.value = 'nodes'
+  await previewNodeSubscription()
+  if (subscriptionPreview.value) flash(`已套用“${preset.name}”，确认差异后再应用`)
+}
+
+async function installRulesetPreset(preset: RulesetPreset) {
+  if (!presetRulesetTarget.value) {
+    error.value = '请选择规则集使用的出口'
+    return
+  }
+  resourceBusy.value = `preset-${preset.name}`
+  error.value = ''
+  try {
+    await api('/api/v1/rulesets', {
+      method: 'POST',
+      body: JSON.stringify({ url: preset.url, target: presetRulesetTarget.value, label: preset.name }),
+    })
+    flash(`${preset.name} 规则集已安装`)
+    await Promise.all([loadAll(), loadResources()])
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    resourceBusy.value = ''
+  }
+}
+
 async function refreshResource(kind: 'subscriptions' | 'rulesets' | 'geosite') {
   resourceBusy.value = kind
   error.value = ''
@@ -849,7 +943,7 @@ onBeforeUnmount(() => {
           <div class="subscription-form">
             <input v-model="subscriptionUrl" type="url" :placeholder="editingSubscription ? '留空保留原订阅地址' : 'https://example.com/subscribe?token=…'" />
             <input v-model="subscriptionLabel" placeholder="显示名称，例如 机场 A" />
-            <input v-model="subscriptionGroup" placeholder="分类组名称，留空自动生成" />
+            <input v-model="subscriptionGroup" placeholder="分类组名称，支持中文和其他语言；留空自动生成" />
             <input v-model="subscriptionInclude" placeholder="包含正则，例如 香港|HK" />
             <input v-model="subscriptionExclude" placeholder="排除正则，例如 过期|剩余流量" />
             <textarea v-model="subscriptionCategories" rows="3" placeholder="附加分类，每行 名称=正则，例如：&#10;香港=香港|HK&#10;台湾=台湾|TW"></textarea>
@@ -906,7 +1000,7 @@ onBeforeUnmount(() => {
         <section v-if="showGroup" class="panel add-panel">
           <div class="section-title"><div><p class="eyebrow">FAILOVER GROUP</p><h2>故障切换组</h2></div></div>
           <div class="form-grid group-form">
-            <input v-model="groupName" :disabled="editingGroup" placeholder="组名，例如 auto" />
+            <input v-model="groupName" :disabled="editingGroup" placeholder="组名，例如 自动优选、日本节点、Global" />
             <div class="member-picker">
               <label v-for="item in concreteExits" :key="item.tag">
                 <input v-model="groupMembers" type="checkbox" :value="item.tag" />
@@ -1028,6 +1122,37 @@ onBeforeUnmount(() => {
       </template>
 
       <template v-if="page === 'resources'">
+        <section class="panel preset-panel">
+          <div class="section-title"><div><p class="eyebrow">SUBSCRIPTION OVERRIDES</p><h2>节点订阅覆写</h2></div></div>
+          <p class="preset-intro">覆写用于整理节点订阅，不是远程脚本。先选择订阅，再套用模板；系统会下载并展示差异，确认后才写入配置。</p>
+          <label class="preset-target">应用到订阅
+            <select v-model="presetSubscriptionId" :disabled="!subscriptions.length">
+              <option v-if="!subscriptions.length" value="">请先在节点页添加订阅</option>
+              <option v-for="item in subscriptions" :key="item.id" :value="item.id">{{ item.label }} · {{ item.count }} 个节点</option>
+            </select>
+          </label>
+          <div class="preset-grid">
+            <article v-for="preset in overridePresets" :key="preset.id" class="preset-card">
+              <div><strong>{{ preset.name }}</strong><p>{{ preset.description }}</p></div>
+              <button class="secondary" :disabled="!presetSubscriptionId" @click="applyOverridePreset(preset)">套用并预览</button>
+            </article>
+          </div>
+        </section>
+        <section class="panel preset-panel">
+          <div class="section-title"><div><p class="eyebrow">RULESET GALLERY</p><h2>常用 GitHub 规则集</h2></div></div>
+          <p class="preset-intro">来源为 <strong>blackmatrix7/ios_rule_script</strong> 和 <strong>DustinWin/ruleset_geodata</strong>。安装前请选择流量出口；下载后仍会经过格式解析、sing-box 校验和失败回滚。</p>
+          <label class="preset-target">规则集出口
+            <select v-model="presetRulesetTarget">
+              <option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }} · {{ item.type }}</option>
+            </select>
+          </label>
+          <div class="preset-grid ruleset-presets">
+            <article v-for="preset in rulesetPresets" :key="preset.name" class="preset-card">
+              <div><strong>{{ preset.name }}</strong><p>{{ preset.description }}</p></div>
+              <button class="secondary" :disabled="resourceBusy === `preset-${preset.name}`" @click="installRulesetPreset(preset)">下载并应用</button>
+            </article>
+          </div>
+        </section>
         <section class="resource-grid">
           <article class="resource-card">
             <div class="resource-head"><Database :size="21" /><div><h2>节点订阅</h2><span>{{ subscriptions.length }} 个来源 · {{ subscriptions.reduce((sum, item) => sum + item.count, 0) }} 个节点</span></div></div>
