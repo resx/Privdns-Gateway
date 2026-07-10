@@ -76,6 +76,10 @@ grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \
 grep -q 'subscriptionAdvanced' "$ROOT/web/src/App.vue" \
   && grep -q '完整订阅 URL' "$ROOT/web/src/App.vue" \
   && ok "订阅添加已简化并保留高级设置" || bad "订阅添加基础/高级分层缺失"
+grep -q 'node-workbench' "$ROOT/web/src/App.vue" \
+  && grep -q 'policy-overview' "$ROOT/web/src/App.vue" \
+  && grep -q 'ruleKindFilter' "$ROOT/web/src/App.vue" \
+  && ok "节点与分流工作台已接入" || bad "节点或分流工作台缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"

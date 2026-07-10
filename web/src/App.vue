@@ -173,6 +173,12 @@ const showAdd = ref(false)
 const link = ref('')
 const preview = ref<Preview | null>(null)
 const search = ref('')
+const nodeSearch = ref('')
+const nodeScope = ref('all')
+const nodeSort = ref<'source' | 'name' | 'delay'>('source')
+const nodeView = ref<'list' | 'grid'>('list')
+const ruleKindFilter = ref<'all' | Rule['kind']>('all')
+const ruleTargetFilter = ref('all')
 const ruleDomain = ref('')
 const ruleTarget = ref('direct')
 const routeDomain = ref('')
@@ -207,11 +213,36 @@ const presetSubscriptionId = ref('')
 const presetRulesetTarget = ref('')
 
 const concreteExits = computed(() => exits.value.filter(item => !item.members.length))
-
+const strategyGroups = computed(() => exits.value.filter(item => item.members.length))
+const activeNodeGroup = computed(() => strategyGroups.value.find(item => item.tag === nodeScope.value) || null)
+const visibleNodes = computed(() => {
+  const allowed = activeNodeGroup.value ? new Set(activeNodeGroup.value.members) : null
+  const query = nodeSearch.value.trim().toLowerCase()
+  const output = concreteExits.value.filter(item => {
+    if (allowed && !allowed.has(item.tag)) return false
+    return !query || `${item.tag} ${item.type} ${item.server || ''}`.toLowerCase().includes(query)
+  })
+  if (nodeSort.value === 'name') output.sort((left, right) => left.tag.localeCompare(right.tag, 'zh-CN'))
+  if (nodeSort.value === 'delay') output.sort((left, right) => {
+    const leftDelay = delays.value[left.tag]?.ok ? delays.value[left.tag].delay ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER
+    const rightDelay = delays.value[right.tag]?.ok ? delays.value[right.tag].delay ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER
+    return leftDelay - rightDelay
+  })
+  return output
+})
+const policyTargets = computed(() => {
+  const counts = new Map<string, number>()
+  for (const item of rules.value) counts.set(item.target, (counts.get(item.target) || 0) + 1)
+  return [...counts.entries()].map(([target, count]) => ({ target, count }))
+    .sort((left, right) => right.count - left.count || left.target.localeCompare(right.target, 'zh-CN'))
+})
 const filteredRules = computed(() => {
   const query = search.value.trim().toLowerCase()
-  if (!query) return rules.value
-  return rules.value.filter(item => `${item.label} ${item.target} ${item.kind}`.toLowerCase().includes(query))
+  return rules.value.filter(item => {
+    if (ruleKindFilter.value !== 'all' && item.kind !== ruleKindFilter.value) return false
+    if (ruleTargetFilter.value !== 'all' && item.target !== ruleTargetFilter.value) return false
+    return !query || `${item.label} ${item.target} ${item.kind}`.toLowerCase().includes(query)
+  })
 })
 
 const navItems = [
@@ -299,6 +330,8 @@ async function loadAll() {
     if (!exits.value.some(item => item.tag === rulesetTarget.value)) rulesetTarget.value = exits.value[0]?.tag || 'direct'
     if (!subscriptions.value.some(item => item.id === presetSubscriptionId.value)) presetSubscriptionId.value = subscriptions.value[0]?.id || ''
     if (!exits.value.some(item => item.tag === presetRulesetTarget.value)) presetRulesetTarget.value = overview.value?.default_exit || exits.value[0]?.tag || 'direct'
+    if (nodeScope.value !== 'all' && !exitList.some(item => item.tag === nodeScope.value && item.members.length)) nodeScope.value = 'all'
+    if (ruleTargetFilter.value !== 'all' && !ruleList.some(item => item.target === ruleTargetFilter.value)) ruleTargetFilter.value = 'all'
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
@@ -1041,33 +1074,61 @@ onBeforeUnmount(() => {
             <button v-if="preview" class="primary" :disabled="loading" @click="addExit">确认应用</button>
           </div>
         </section>
-        <section class="exit-grid">
-          <article v-for="item in exits" :key="item.tag" class="exit-card" :class="{ selected: item.default }">
-            <div class="exit-head">
-              <div><span class="protocol">{{ item.type }}</span><h2>{{ item.tag }}</h2></div>
-              <span v-if="item.default" class="badge">默认</span>
+        <section class="node-workbench">
+          <aside class="strategy-sidebar">
+            <div class="strategy-heading"><div><p class="eyebrow">POLICY GROUPS</p><h2>策略组</h2></div><span>{{ strategyGroups.length }}</span></div>
+            <button :class="{ active: nodeScope === 'all' }" @click="nodeScope = 'all'">
+              <span>全部节点</span><small>{{ concreteExits.length }}</small>
+            </button>
+            <button v-for="group in strategyGroups" :key="group.tag" :class="{ active: nodeScope === group.tag }" @click="nodeScope = group.tag">
+              <span>{{ group.tag }}</span>
+              <small>{{ group.members.length }} · {{ group.mode === 'manual' ? '固定' : '自动' }}</small>
+            </button>
+          </aside>
+          <div class="node-browser">
+            <div class="node-toolbar">
+              <div>
+                <p class="eyebrow">{{ activeNodeGroup ? 'ACTIVE GROUP' : 'ALL OUTBOUNDS' }}</p>
+                <h2>{{ activeNodeGroup?.tag || '全部节点' }} <span>{{ visibleNodes.length }}</span></h2>
+              </div>
+              <div class="node-tools">
+                <input v-model="nodeSearch" class="search" placeholder="搜索节点、协议或地址" />
+                <select v-model="nodeSort"><option value="source">默认排序</option><option value="name">名称排序</option><option value="delay">延迟排序</option></select>
+                <button class="view-toggle" :class="{ active: nodeView === 'list' }" @click="nodeView = 'list'">列表</button>
+                <button class="view-toggle" :class="{ active: nodeView === 'grid' }" @click="nodeView = 'grid'">卡片</button>
+              </div>
             </div>
-            <p v-if="item.members.length" class="route-chain">{{ item.members.join(' → ') }}</p>
-            <p v-else class="muted endpoint">{{ item.server || '本机直出' }}<template v-if="item.server_port">:{{ item.server_port }}</template></p>
-            <div v-if="item.members.length" class="group-selection">
-              <label>组内策略</label>
-              <select :value="item.mode === 'manual' ? item.selected || '' : ''" @change="groupSelectionChange(item, $event)">
-                <option value="">自动优选</option><option v-for="member in item.members" :key="member" :value="member">固定 · {{ member }}</option>
-              </select>
+            <div v-if="activeNodeGroup" class="active-group-bar">
+              <label>当前策略
+                <select :value="activeNodeGroup.mode === 'manual' ? activeNodeGroup.selected || '' : ''" @change="groupSelectionChange(activeNodeGroup, $event)">
+                  <option value="">自动优选</option><option v-for="member in activeNodeGroup.members" :key="member" :value="member">固定 · {{ member }}</option>
+                </select>
+              </label>
+              <span>{{ activeNodeGroup.default ? '默认出口' : `${activeNodeGroup.references} 个引用` }}</span>
+              <button :disabled="testing" @click="testExits(activeNodeGroup.members)"><Gauge :size="14" />组内测速</button>
+              <button v-if="!activeNodeGroup.default" @click="setFinal(activeNodeGroup.tag)">设为默认</button>
+              <button @click="editGroup(activeNodeGroup)">编辑成员</button>
             </div>
-            <div class="exit-meta">
-              <span v-if="delays[item.tag]" :class="delays[item.tag].ok ? 'good' : 'bad'" :title="delays[item.tag].error || ''">
-                {{ delays[item.tag].ok ? `${delays[item.tag].delay} ms` : delays[item.tag].error || '不可用' }}
-              </span>
-              <span>{{ item.references }} 个引用</span>
+            <div class="node-collection" :class="nodeView">
+              <article v-for="item in visibleNodes" :key="item.tag" class="node-item" :class="{ selected: item.default, active: activeNodeGroup?.selected === item.tag }">
+                <div class="node-identity"><span class="protocol">{{ item.type }}</span><strong>{{ item.tag }}</strong><small>{{ item.server || '本机直出' }}<template v-if="item.server_port">:{{ item.server_port }}</template></small></div>
+                <span v-if="item.default" class="badge">默认</span>
+                <span v-else-if="activeNodeGroup?.selected === item.tag" class="badge">已固定</span>
+                <span v-if="delays[item.tag]" class="node-delay" :class="delays[item.tag].ok ? 'good' : 'bad'" :title="delays[item.tag].error || ''">
+                  {{ delays[item.tag].ok ? `${delays[item.tag].delay} ms` : '失败' }}
+                </span>
+                <span v-else class="node-delay muted">未测速</span>
+                <span class="node-reference">{{ item.references }} 引用</span>
+                <div class="row-actions">
+                  <button :disabled="testing" @click="testExits([item.tag])">测速</button>
+                  <button v-if="activeNodeGroup && activeNodeGroup.selected !== item.tag" @click="setGroupSelection(activeNodeGroup, item.tag)">固定</button>
+                  <button v-if="!item.default" @click="setFinal(item.tag)">默认</button>
+                  <button v-if="item.deletable" class="text-danger" @click="removeExit(item)"><Trash2 :size="14" /></button>
+                </div>
+              </article>
+              <p v-if="!visibleNodes.length" class="empty">没有匹配的节点</p>
             </div>
-            <div class="card-actions">
-              <button :disabled="testing" @click="testExits(item.members.length ? item.members : [item.tag])"><Gauge :size="14" />测速</button>
-              <button v-if="!item.default" @click="setFinal(item.tag)">设为默认</button>
-              <button v-if="item.members.length" @click="editGroup(item)">编辑成员</button>
-              <button v-if="item.deletable" class="danger" @click="removeExit(item)"><Trash2 :size="14" /></button>
-            </div>
-          </article>
+          </div>
         </section>
       </template>
 
@@ -1093,21 +1154,35 @@ onBeforeUnmount(() => {
             <button class="primary" @click="saveRule">保存规则</button>
           </div>
         </section>
-        <section class="panel">
+        <section class="policy-overview">
+          <button class="policy-summary" :class="{ active: ruleTargetFilter === 'all' }" @click="ruleTargetFilter = 'all'">
+            <span>全部策略</span><strong>{{ rules.length }}</strong><small>所有规则</small>
+          </button>
+          <button v-for="policy in policyTargets" :key="policy.target" class="policy-summary" :class="{ active: ruleTargetFilter === policy.target }" @click="ruleTargetFilter = policy.target">
+            <span>{{ policy.target }}</span><strong>{{ policy.count }}</strong><small>{{ exits.find(item => item.tag === policy.target)?.type || (policy.target === 'direct' ? '直连' : '出口') }}</small>
+          </button>
+        </section>
+        <section class="panel policy-table-panel">
           <div class="section-title rules-heading">
-            <div><p class="eyebrow">POLICIES</p><h2>当前分流</h2></div>
-            <input v-model="search" class="search" placeholder="搜索域名或出口" />
+            <div><p class="eyebrow">POLICIES</p><h2>规则工作台</h2></div>
+            <div class="rule-tools">
+              <select v-model="ruleKindFilter"><option value="all">全部类型</option><option value="domain">域名</option><option value="direct">直连</option><option value="ruleset">规则集</option></select>
+              <select v-model="ruleTargetFilter"><option value="all">全部目标</option><option value="direct">direct</option><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }}</option></select>
+              <input v-model="search" class="search" placeholder="搜索规则或目标" />
+            </div>
           </div>
+          <div class="policy-table-head"><span>规则</span><span>目标策略</span><span>规模</span><span>操作</span></div>
           <div class="rule-list">
             <div v-for="item in filteredRules" :key="`${item.kind}-${item.value}-${item.target}`" class="rule-row">
-              <div><span class="kind">{{ item.kind === 'ruleset' ? '规则集' : item.kind === 'direct' ? '直连' : '域名' }}</span><strong>{{ item.label }}</strong></div>
-              <div v-if="item.kind === 'ruleset'" class="rule-target"><span>→</span><strong>{{ item.target }}</strong></div>
-              <select v-else class="quick-target" :value="item.target" @change="ruleTargetChange(item, $event)">
+              <div><span class="kind">{{ item.kind === 'ruleset' ? '规则集' : item.kind === 'direct' ? '直连' : '域名' }}</span><strong>{{ item.label }}</strong><small>{{ item.value }}</small></div>
+              <select v-if="item.kind !== 'ruleset'" class="quick-target" :value="item.target" @change="ruleTargetChange(item, $event)">
                 <option value="direct">direct</option>
                 <option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option>
               </select>
-              <span v-if="item.count" class="muted">{{ item.count }} 条</span>
+              <div v-else class="rule-target"><span>→</span><strong>{{ item.target }}</strong></div>
+              <span class="muted">{{ item.count ? `${item.count} 条` : '单条' }}</span>
               <button v-if="item.kind !== 'ruleset'" class="text-danger" @click="removeRule(item)">删除</button>
+              <button v-else @click="selectPage('resources')">管理资源</button>
             </div>
             <p v-if="!filteredRules.length" class="empty">没有匹配的分流规则</p>
           </div>

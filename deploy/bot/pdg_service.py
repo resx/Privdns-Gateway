@@ -325,22 +325,30 @@ class GatewayService:
         return data, title
 
     @staticmethod
-    def _subscription_tag(identifier: str, outbound: dict, used: dict[str, str]) -> str:
-        original = normalize_tag(str(outbound.get("tag", "node")))
-        digest_source = {key: value for key, value in outbound.items() if key != "tag"}
-        digest = hashlib.sha1(json.dumps(digest_source, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
-        base = normalize_tag(f"{identifier}-{original}")[:40]
+    def _outbound_digest(outbound: dict) -> str:
+        value = {key: item for key, item in outbound.items() if key != "tag"}
+        return hashlib.sha1(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    @staticmethod
+    def _tag_with_suffix(base: str, suffix: str) -> str:
+        while len((base + suffix).encode("utf-8")) > 64:
+            base = base[:-1]
+        return base.rstrip("-.") + suffix
+
+    @classmethod
+    def _subscription_tag(cls, outbound: dict, used: dict[str, str | None]) -> str:
+        base = normalize_tag(str(outbound.get("tag", "node")))
+        digest = cls._outbound_digest(outbound)
         if base not in used:
             used[base] = digest
             return base
         if used[base] == digest:
             return base
-        tag = base[:33] + "-" + digest[:6]
-        suffix = 1
+        tag = cls._tag_with_suffix(base, "-" + digest[:6])
+        sequence = 2
         while tag in used and used[tag] != digest:
-            tail = f"-{suffix}"
-            tag = (base[:40 - len(tail)] + tail)
-            suffix += 1
+            tag = cls._tag_with_suffix(base, f"-{digest[:6]}-{sequence}")
+            sequence += 1
         used[tag] = digest
         return tag
 
@@ -396,10 +404,12 @@ class GatewayService:
         }]
         occupied = {master_tag, *(item["tag"] for item in outbounds)}
         for category in self._normalize_categories(categories):
-            category_hash = hashlib.sha1(category["name"].encode()).hexdigest()[:8]
-            tag = normalize_tag(f"{identifier}-cat-{category_hash}")[:40]
-            if tag in occupied:
-                raise ServiceError(f"节点分类组名称冲突: {category['name']}")
+            base = self._group_tag(f"{master_tag}-{category['name']}")
+            tag = base
+            sequence = 2
+            while tag in occupied:
+                tag = self._tag_with_suffix(base, f"-{sequence}")
+                sequence += 1
             occupied.add(tag)
             matcher = self._subscription_regex(category["pattern"], f"分类 {category['name']} ")
             members = [node_tag for original, node_tag in named_tags if matcher and matcher.search(original)]
@@ -466,7 +476,15 @@ class GatewayService:
         if not selected:
             raise ServiceError("订阅过滤后没有可用节点，未修改现有配置")
 
-        used, outbounds, named_tags = {}, [], []
+        meta = self._subscription_meta()
+        previous = meta.get(identifier, {})
+        old_nodes = set(previous.get("nodes", []))
+        current_outbounds = self.control.load().get("outbounds", [])
+        used: dict[str, str | None] = {
+            str(item.get("tag")): None for item in current_outbounds
+            if item.get("tag") and item.get("tag") not in old_nodes
+        }
+        outbounds, named_tags = [], []
         for outbound, display_name in selected:
             value = json.loads(json.dumps(outbound))
             value["tag"] = display_name
@@ -474,7 +492,7 @@ class GatewayService:
                 if property_name == "tcp_fast_open" and enabled and value.get("type") == "anytls":
                     continue
                 value[property_name] = enabled
-            tag = self._subscription_tag(identifier, value, used)
+            tag = self._subscription_tag(value, used)
             if any(item.get("tag") == tag for item in outbounds):
                 continue
             value["tag"] = tag
@@ -493,10 +511,7 @@ class GatewayService:
         if group_tag in {item["tag"] for item in outbounds}:
             raise ServiceError("订阅分类组名称与节点冲突")
 
-        meta = self._subscription_meta()
-        previous = meta.get(identifier, {})
-        old_nodes = set(previous.get("nodes", []))
-        current = {item.get("tag"): item for item in self.control.load().get("outbounds", [])}
+        current = {item.get("tag"): item for item in current_outbounds}
         new_nodes = {item["tag"]: item for item in outbounds}
         added = sorted(tag for tag in new_nodes if tag not in current)
         updated = sorted(tag for tag, item in new_nodes.items() if tag in current and current[tag] != item)
@@ -602,10 +617,47 @@ class GatewayService:
             new_groups = {item["tag"] for item in group_specs}
             old_owned = old_nodes | old_groups
             new_owned = new_nodes | new_groups
+            current_config = self.control.load()
+            current_by_tag = {item.get("tag"): item for item in current_config.get("outbounds", [])}
+            new_by_digest = {
+                self._outbound_digest(item): item["tag"] for item in prepared["outbounds"]
+            }
+            replacements = {}
+            legacy_prefix = identifier + "-"
+            for old_tag in old_nodes:
+                old_outbound = current_by_tag.get(old_tag)
+                if not old_outbound:
+                    continue
+                replacement = new_by_digest.get(self._outbound_digest(old_outbound))
+                if not replacement and old_tag.startswith(legacy_prefix):
+                    legacy_name = old_tag[len(legacy_prefix):]
+                    matches = [tag for tag in new_nodes if tag == legacy_name or tag.startswith(legacy_name)]
+                    if len(matches) == 1:
+                        replacement = matches[0]
+                if replacement:
+                    replacements[old_tag] = replacement
+            if previous.get("group") and previous.get("group") != new_group:
+                replacements[previous["group"]] = new_group
+            new_groups_by_label = {
+                item["label"]: item["tag"] for item in prepared["groups"] if not item["master"]
+            }
+            for old_spec in previous.get("groups", []):
+                old_tag = old_spec.get("tag")
+                replacement = new_groups_by_label.get(old_spec.get("label"))
+                if old_tag and replacement and old_tag != replacement:
+                    replacements[old_tag] = replacement
+
             existing_groups = {
-                item.get("tag"): item for item in self.control.load().get("outbounds", [])
+                item.get("tag"): json.loads(json.dumps(item))
+                for item in current_config.get("outbounds", [])
                 if item.get("tag") in old_groups and item.get("type") in GROUP_TYPES
             }
+            for existing in existing_groups.values():
+                if existing.get("default") in replacements:
+                    existing["default"] = replacements[existing["default"]]
+            for old_tag, replacement in replacements.items():
+                if replacement not in existing_groups and old_tag in existing_groups:
+                    existing_groups[replacement] = existing_groups[old_tag]
             old_master = existing_groups.get(previous.get("group"))
             if new_group not in existing_groups and old_master:
                 existing_groups[new_group] = old_master
@@ -629,20 +681,22 @@ class GatewayService:
                 removed = old_owned - new_owned
                 route = config.setdefault("route", {})
                 if route.get("final") in removed:
-                    route["final"] = new_group
+                    route["final"] = replacements.get(route["final"], new_group)
                 for rule in route.setdefault("rules", []):
                     if rule.get("outbound") in removed:
-                        rule["outbound"] = new_group
+                        rule["outbound"] = replacements.get(rule["outbound"], new_group)
                 empty_groups = set()
                 for outbound in config["outbounds"]:
                     if outbound.get("detour") in removed:
-                        outbound["detour"] = new_group
+                        outbound["detour"] = replacements.get(outbound["detour"], new_group)
                     if outbound.get("type") in GROUP_TYPES and outbound.get("tag") != new_group:
-                        outbound["outbounds"] = [
-                            member for member in outbound.get("outbounds", []) if member not in removed
-                        ]
+                        members = [replacements.get(member, member) for member in outbound.get("outbounds", [])]
+                        outbound["outbounds"] = list(dict.fromkeys(
+                            member for member in members if member not in removed or member in replacements.values()
+                        ))
                         if outbound.get("type") == "selector" and outbound.get("default") in removed:
-                            outbound["default"] = outbound["outbounds"][0] if outbound["outbounds"] else ""
+                            selected = replacements.get(outbound["default"])
+                            outbound["default"] = selected or (outbound["outbounds"][0] if outbound["outbounds"] else "")
                         if not outbound["outbounds"]:
                             empty_groups.add(outbound.get("tag"))
                 if empty_groups:

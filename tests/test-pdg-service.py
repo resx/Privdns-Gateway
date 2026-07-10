@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "deploy" / "bot"))
 
 from pdg_control import SingBoxControl  # noqa: E402
+from pdg_links import normalize_tag  # noqa: E402
 from pdg_service import GatewayService, ServiceError  # noqa: E402
 
 
@@ -152,6 +153,14 @@ with tempfile.TemporaryDirectory() as directory:
     assert sub_meta["group"] == "机场-A" and sub_meta["group_input"] == ""
     assert sub_meta["overrides"] == overrides
     old_nodes = sub_meta["nodes"]
+    assert all(not tag.startswith(saved_sub["id"] + "-") for tag in old_nodes)
+    assert service._subscription_tag(
+        {"type": "socks", "tag": "节点", "server": "node.example", "server_port": 1080}, {},
+    ) == "节点"
+    conflict_tag = service._subscription_tag(
+        {"type": "socks", "tag": "节点", "server": "other.example", "server_port": 1080}, {"节点": None},
+    )
+    assert conflict_tag.startswith("节点-") and not conflict_tag.startswith("sub_")
     current = json.loads(config_path.read_text(encoding="utf-8"))
     assert len(sub_meta["groups"]) == 3
     assert all(any(item.get("tag") == group["tag"] for item in current["outbounds"]) for group in sub_meta["groups"])
@@ -174,15 +183,48 @@ with tempfile.TemporaryDirectory() as directory:
     service.set_group_selection(sub_meta["group"], old_nodes[0])
     meta_before_migration = json.loads(subscription_path.read_text(encoding="utf-8"))
     meta_before_migration[saved_sub["id"]].pop("group_input", None)
-    meta_before_migration[saved_sub["id"]]["group"] = saved_sub["id"] + "-auto"
+    legacy_group = saved_sub["id"] + "-auto"
+    legacy_nodes = {
+        tag: normalize_tag(f"{saved_sub['id']}-{tag}")[:40] for tag in old_nodes
+    }
+    meta_before_migration[saved_sub["id"]]["group"] = legacy_group
+    meta_before_migration[saved_sub["id"]]["nodes"] = sorted(legacy_nodes.values())
     for group_info in meta_before_migration[saved_sub["id"]]["groups"]:
         if group_info["label"] == "全部节点":
-            group_info["tag"] = saved_sub["id"] + "-auto"
+            group_info["tag"] = legacy_group
     subscription_path.write_text(json.dumps(meta_before_migration), encoding="utf-8")
     current = json.loads(config_path.read_text(encoding="utf-8"))
+    current["route"]["final"] = legacy_nodes[old_nodes[0]]
+    current["route"]["rules"].append({"domain_suffix": ["mapped.example"], "outbound": legacy_nodes[old_nodes[0]]})
+    current["outbounds"].append({
+        "type": "urltest", "tag": "external-sub-group",
+        "outbounds": [legacy_nodes[old_nodes[0]], "hk"],
+    })
+    legacy_category = saved_sub["id"] + "-cat-legacy"
+    readable_category = next(group["tag"] for group in sub_meta["groups"] if group["label"] == "香港")
+    for group_info in meta_before_migration[saved_sub["id"]]["groups"]:
+        if group_info["label"] == "香港":
+            group_info["tag"] = legacy_category
+    subscription_path.write_text(json.dumps(meta_before_migration), encoding="utf-8")
     for outbound in current["outbounds"]:
-        if outbound.get("tag") == sub_meta["group"]:
-            outbound["tag"] = saved_sub["id"] + "-auto"
+        tag = outbound.get("tag")
+        if tag == sub_meta["group"]:
+            outbound["tag"] = legacy_group
+        elif tag == readable_category:
+            outbound.clear()
+            outbound.update({
+                "type": "selector", "tag": legacy_category,
+                "outbounds": [legacy_nodes[old_nodes[0]]], "default": legacy_nodes[old_nodes[0]],
+            })
+        elif tag in legacy_nodes:
+            outbound["tag"] = legacy_nodes[tag]
+        if outbound.get("type") in ("urltest", "selector"):
+            outbound["outbounds"] = [legacy_nodes.get(member, member) for member in outbound.get("outbounds", [])]
+            if outbound.get("default") in legacy_nodes:
+                outbound["default"] = legacy_nodes[outbound["default"]]
+    for rule in current["route"]["rules"]:
+        if rule.get("outbound") in legacy_nodes:
+            rule["outbound"] = legacy_nodes[rule["outbound"]]
     config_path.write_text(json.dumps(current), encoding="utf-8")
 
     service._fetch_subscription = lambda url: (base64.urlsafe_b64encode(
@@ -193,7 +235,17 @@ with tempfile.TemporaryDirectory() as directory:
     current = json.loads(config_path.read_text(encoding="utf-8"))
     selected_group = next(item for item in current["outbounds"] if item.get("tag") == "机场-A")
     assert selected_group["type"] == "selector" and selected_group["default"] == old_nodes[0]
-    assert all(item.get("tag") != saved_sub["id"] + "-auto" for item in current["outbounds"])
+    current_tags = {item.get("tag") for item in current["outbounds"]}
+    assert legacy_group not in current_tags
+    assert not (set(legacy_nodes.values()) & current_tags)
+    assert current["route"]["final"] == old_nodes[0]
+    assert any(rule.get("domain_suffix") == ["mapped.example"] and rule.get("outbound") == old_nodes[0]
+               for rule in current["route"]["rules"])
+    external_group = next(item for item in current["outbounds"] if item.get("tag") == "external-sub-group")
+    assert external_group["outbounds"] == [old_nodes[0], "hk"]
+    migrated_category = next(item for item in current["outbounds"] if item.get("tag") == readable_category)
+    assert migrated_category["type"] == "selector" and migrated_category["default"] == old_nodes[0]
+    assert legacy_category not in current_tags
     assert all(rule.get("outbound") != old_nodes[-1] for rule in current["route"]["rules"])
     assert any(rule.get("outbound") == sub_meta["group"] for rule in current["route"]["rules"])
     service.set_final(sub_meta["group"])
@@ -249,6 +301,7 @@ with tempfile.TemporaryDirectory() as directory:
     assert service.remove_ruleset(ruleset["tag"])["deleted"] == ruleset["tag"]
     assert all(item["tag"] != ruleset["tag"] for item in service.list_rulesets())
     service.remove_group("🇯🇵-自动优选_日本")
+    service.remove_group("external-sub-group")
 
     impact = service.exit_impact("hk")
     assert impact["groups"] == ["auto"] and impact["rules"]
