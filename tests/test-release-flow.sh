@@ -62,7 +62,7 @@ git -C "$work/shallow" tag -f v2.0.0-rc.1 HEAD >/dev/null
 REPO_DIR="$work/shallow" bash -c "$fetcher; pdg_fetch_release_tags"
 [[ "$(git -C "$work/shallow" rev-parse --is-shallow-repository)" == "false" ]] \
   || fail "legacy shallow install must be unshallowed"
-[[ "$(git -C "$work/shallow" rev-parse v2.0.0-rc.1^{commit})" == "$(git -C "$work/repo" rev-parse v2.0.0-rc.1^{commit})" ]] \
+[[ "$(git -C "$work/shallow" rev-parse "v2.0.0-rc.1^{commit}")" == "$(git -C "$work/repo" rev-parse "v2.0.0-rc.1^{commit}")" ]] \
   || fail "moved rc tag must be force-synchronized while unshallowing"
 
 grep -q '_fetch_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
