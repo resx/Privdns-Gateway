@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  Activity, ChevronDown, ChevronRight, Database, Gauge, House, Network, Plus,
-  RefreshCw, Route, Search, Server, Settings, Trash2,
+  Activity, ChevronDown, ChevronRight, ChevronsUpDown, Database, Gauge, House,
+  ListTree, Network, Pencil, Pin, Plus, RefreshCw, Route, Search, Server,
+  Settings, Trash2, X,
 } from '@lucide/vue'
 
 type Page = 'overview' | 'nodes' | 'rules' | 'resources' | 'runtime' | 'system'
@@ -153,6 +154,22 @@ interface RuntimeState {
   download_total: number
 }
 
+function storedChoice<T extends string>(key: string, choices: readonly T[], fallback: T): T {
+  const value = localStorage.getItem(key) as T | null
+  return value && choices.includes(value) ? value : fallback
+}
+
+function storedList(key: string): string[] | null {
+  const value = localStorage.getItem(key)
+  if (value === null) return null
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) && parsed.every(item => typeof item === 'string') ? parsed : []
+  } catch {
+    return []
+  }
+}
+
 const fragmentToken = new URLSearchParams(location.hash.slice(1)).get('token') || ''
 if (fragmentToken) {
   localStorage.setItem('pdg-admin-token', fragmentToken)
@@ -161,7 +178,7 @@ if (fragmentToken) {
 
 const token = ref(localStorage.getItem('pdg-admin-token') || '')
 const tokenInput = ref('')
-const page = ref<Page>('overview')
+const page = ref<Page>(storedChoice('pdg-page', ['overview', 'nodes', 'rules', 'resources', 'runtime', 'system'] as const, 'overview'))
 const loading = ref(false)
 const error = ref('')
 const notice = ref('')
@@ -179,17 +196,18 @@ const link = ref('')
 const preview = ref<Preview | null>(null)
 const search = ref('')
 const nodeSearch = ref('')
-const nodeWorkspace = ref<'groups' | 'providers' | 'nodes'>('groups')
+const nodeWorkspace = ref(storedChoice('pdg-node-workspace', ['groups', 'providers', 'nodes'] as const, 'groups'))
 const nodeScope = ref('all')
 const nodeStatusFilter = ref<'all' | 'available' | 'failed' | 'untested'>('all')
 const nodeSourceFilter = ref('all')
-const nodeSort = ref<'source' | 'name' | 'delay'>('source')
-const nodeView = ref<'list' | 'grid'>('list')
-const expandedGroups = ref<string[]>([])
-const ruleWorkspace = ref<'rules' | 'providers'>('rules')
+const nodeSort = ref(storedChoice('pdg-node-sort', ['source', 'name', 'delay'] as const, 'source'))
+const nodeView = ref(storedChoice('pdg-node-view', ['list', 'grid'] as const, 'list'))
+const storedExpandedGroups = storedList('pdg-expanded-groups')
+const expandedGroups = ref<string[]>(storedExpandedGroups || [])
+const ruleWorkspace = ref(storedChoice('pdg-rule-workspace', ['rules', 'providers'] as const, 'rules'))
 const ruleKindFilter = ref<'all' | Rule['kind']>('all')
 const ruleTargetFilter = ref('all')
-const ruleSort = ref<'source' | 'name' | 'target'>('source')
+const ruleSort = ref(storedChoice('pdg-rule-sort', ['source', 'name', 'target'] as const, 'source'))
 const showRouteTester = ref(false)
 const showRuleComposer = ref(false)
 const showRulesetComposer = ref(false)
@@ -226,6 +244,14 @@ const subscriptionPreviewInput = ref('')
 const presetSubscriptionId = ref('')
 const presetRulesetTarget = ref('')
 
+watch(page, value => localStorage.setItem('pdg-page', value))
+watch(nodeWorkspace, value => localStorage.setItem('pdg-node-workspace', value))
+watch(nodeSort, value => localStorage.setItem('pdg-node-sort', value))
+watch(nodeView, value => localStorage.setItem('pdg-node-view', value))
+watch(ruleWorkspace, value => localStorage.setItem('pdg-rule-workspace', value))
+watch(ruleSort, value => localStorage.setItem('pdg-rule-sort', value))
+watch(expandedGroups, value => localStorage.setItem('pdg-expanded-groups', JSON.stringify(value)), { deep: true })
+
 const concreteExits = computed(() => exits.value.filter(item => !item.members.length))
 const strategyGroups = computed(() => exits.value.filter(item => item.members.length))
 const activeNodeGroup = computed(() => strategyGroups.value.find(item => item.tag === nodeScope.value) || null)
@@ -237,6 +263,11 @@ const visibleGroups = computed(() => {
     return group.members.some(member => member.toLowerCase().includes(query))
   })
 })
+const allGroupsExpanded = computed(() => (
+  visibleGroups.value.length > 0 && visibleGroups.value.every(group => expandedGroups.value.includes(group.tag))
+))
+const nodeSheetOpen = computed(() => showSubscription.value || showGroup.value || showAdd.value)
+watch(nodeSheetOpen, value => document.body.classList.toggle('sheet-open', value))
 const nodeHealth = computed(() => {
   const output = { available: 0, failed: 0, untested: 0 }
   for (const item of concreteExits.value) {
@@ -289,6 +320,26 @@ function toggleGroup(tag: string) {
   expandedGroups.value = isGroupExpanded(tag)
     ? expandedGroups.value.filter(item => item !== tag)
     : [...expandedGroups.value, tag]
+}
+
+function toggleAllGroups() {
+  const visible = new Set(visibleGroups.value.map(group => group.tag))
+  expandedGroups.value = allGroupsExpanded.value
+    ? expandedGroups.value.filter(tag => !visible.has(tag))
+    : [...new Set([...expandedGroups.value, ...visible])]
+}
+
+function closeNodeSheets() {
+  showSubscription.value = false
+  showGroup.value = false
+  showAdd.value = false
+}
+
+function openAddNode() {
+  const opening = !showAdd.value
+  closeNodeSheets()
+  preview.value = null
+  showAdd.value = opening
 }
 
 function delayTone(tag: string) {
@@ -440,7 +491,8 @@ async function loadAll() {
     if (!subscriptions.value.some(item => item.id === presetSubscriptionId.value)) presetSubscriptionId.value = subscriptions.value[0]?.id || ''
     if (!exits.value.some(item => item.tag === presetRulesetTarget.value)) presetRulesetTarget.value = overview.value?.default_exit || exits.value[0]?.tag || 'direct'
     if (nodeScope.value !== 'all' && !exitList.some(item => item.tag === nodeScope.value && item.members.length)) nodeScope.value = 'all'
-    if (!expandedGroups.value.length && strategyGroups.value.length) {
+    expandedGroups.value = expandedGroups.value.filter(tag => strategyGroups.value.some(group => group.tag === tag))
+    if (storedExpandedGroups === null && !expandedGroups.value.length && strategyGroups.value.length) {
       const initial = strategyGroups.value.find(item => item.default) || strategyGroups.value[0]
       expandedGroups.value = initial ? [initial.tag] : []
     }
@@ -586,6 +638,7 @@ function subscriptionInputKey() {
 }
 
 function editSubscription(item?: Subscription) {
+  closeNodeSheets()
   editingSubscription.value = item || null
   subscriptionUrl.value = ''
   subscriptionLabel.value = item?.custom_label ? item.label : ''
@@ -718,6 +771,7 @@ async function removeRule(item: Rule) {
 }
 
 function editGroup(item?: Exit) {
+  closeNodeSheets()
   groupName.value = item?.tag || ''
   groupMembers.value = item?.members ? [...item.members] : []
   editingGroup.value = Boolean(item)
@@ -972,6 +1026,7 @@ async function loadLogs() {
 
 let runtimeTimer: number | undefined
 async function selectPage(next: Page) {
+  closeNodeSheets()
   if (runtimeTimer) window.clearInterval(runtimeTimer)
   runtimeTimer = undefined
   page.value = next
@@ -1004,9 +1059,18 @@ function serviceActive(value: string) {
   return value === 'active'
 }
 
-onMounted(loadAll)
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && nodeSheetOpen.value) closeNodeSheets()
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown)
+  loadAll()
+})
 onBeforeUnmount(() => {
   if (runtimeTimer) window.clearInterval(runtimeTimer)
+  window.removeEventListener('keydown', handleGlobalKeydown)
+  document.body.classList.remove('sheet-open')
 })
 </script>
 
@@ -1082,19 +1146,20 @@ onBeforeUnmount(() => {
 
       <template v-if="page === 'nodes'">
         <div class="section-actions node-actions">
-          <select v-model="testTarget" class="target-select">
+          <select v-model="testTarget" class="target-select" aria-label="测速目标">
             <option value="google">Google 204</option><option value="cloudflare">Cloudflare 204</option><option value="apple">Apple</option>
           </select>
-          <button class="secondary" :disabled="testing" @click="testExits()"><Gauge :size="17" />{{ testing ? '测速中…' : '批量测速' }}</button>
-          <button class="secondary" @click="editSubscription()"><Database :size="17" />添加订阅</button>
-          <button class="secondary" @click="editGroup()"><Network :size="17" />节点组</button>
-          <button class="primary" @click="showAdd = !showAdd; preview = null"><Plus :size="17" />添加节点</button>
+          <button class="secondary batch-test" :disabled="testing" title="批量测试全部节点" @click="testExits()"><Gauge :size="17" /><span>{{ testing ? '测速中…' : '批量测速' }}</span></button>
+          <button class="secondary" title="添加或管理节点订阅" @click="editSubscription()"><Database :size="17" /><span>添加订阅</span></button>
+          <button class="secondary" title="创建节点策略组" @click="editGroup()"><Network :size="17" /><span>节点组</span></button>
+          <button class="primary" title="粘贴单个节点链接" @click="openAddNode"><Plus :size="17" /><span>添加节点</span></button>
         </div>
+        <div v-if="nodeSheetOpen" class="sheet-backdrop" @click="closeNodeSheets"></div>
         <section class="workspace-switcher">
           <div class="segmented-control">
-            <button :class="{ active: nodeWorkspace === 'groups' }" @click="nodeWorkspace = 'groups'; nodeScope = 'all'">策略组 <span>{{ strategyGroups.length }}</span></button>
-            <button :class="{ active: nodeWorkspace === 'providers' }" @click="nodeWorkspace = 'providers'">订阅来源 <span>{{ subscriptions.length }}</span></button>
-            <button :class="{ active: nodeWorkspace === 'nodes' }" @click="openAllNodes">全部节点 <span>{{ concreteExits.length }}</span></button>
+            <button :class="{ active: nodeWorkspace === 'groups' }" title="策略组" @click="nodeWorkspace = 'groups'; nodeScope = 'all'">策略组 <span>{{ strategyGroups.length }}</span></button>
+            <button :class="{ active: nodeWorkspace === 'providers' }" title="订阅来源" @click="nodeWorkspace = 'providers'">订阅 <span>{{ subscriptions.length }}</span></button>
+            <button :class="{ active: nodeWorkspace === 'nodes' }" title="全部节点" @click="openAllNodes">节点 <span>{{ concreteExits.length }}</span></button>
           </div>
           <div class="health-summary">
             <button class="fast" @click="nodeStatusFilter = 'available'; openAllNodes()">可用 {{ nodeHealth.available }}</button>
@@ -1102,10 +1167,10 @@ onBeforeUnmount(() => {
             <button class="untested" @click="nodeStatusFilter = 'untested'; openAllNodes()">未测 {{ nodeHealth.untested }}</button>
           </div>
         </section>
-        <section v-if="showSubscription" class="panel add-panel">
-          <div class="section-title">
+        <section v-if="showSubscription" class="panel add-panel node-sheet">
+          <div class="section-title sheet-title">
             <div><p class="eyebrow">NODE SUBSCRIPTION</p><h2>{{ editingSubscription ? `编辑 ${editingSubscription.label}` : '添加节点订阅' }}</h2></div>
-            <button class="secondary" @click="showSubscription = false">关闭</button>
+            <button class="icon-button sheet-close" title="关闭" @click="showSubscription = false"><X :size="18" /></button>
           </div>
           <div class="subscription-form">
             <div class="subscription-basic">
@@ -1180,8 +1245,8 @@ onBeforeUnmount(() => {
             </article>
           </div>
         </section>
-        <section v-if="showGroup" class="panel add-panel">
-          <div class="section-title"><div><p class="eyebrow">FAILOVER GROUP</p><h2>故障切换组</h2></div></div>
+        <section v-if="showGroup" class="panel add-panel node-sheet">
+          <div class="section-title sheet-title"><div><p class="eyebrow">FAILOVER GROUP</p><h2>故障切换组</h2></div><button class="icon-button sheet-close" title="关闭" @click="showGroup = false"><X :size="18" /></button></div>
           <div class="form-grid group-form">
             <input v-model="groupName" :disabled="editingGroup" placeholder="组名，例如 自动优选、日本节点、Global" />
             <div class="member-picker">
@@ -1193,8 +1258,8 @@ onBeforeUnmount(() => {
             <button class="primary" @click="saveGroup">保存故障组</button>
           </div>
         </section>
-        <section v-if="showAdd" class="panel add-panel">
-          <div class="section-title"><div><p class="eyebrow">NEW OUTBOUND</p><h2>粘贴节点链接</h2></div></div>
+        <section v-if="showAdd" class="panel add-panel node-sheet">
+          <div class="section-title sheet-title"><div><p class="eyebrow">NEW OUTBOUND</p><h2>粘贴节点链接</h2></div><button class="icon-button sheet-close" title="关闭" @click="showAdd = false"><X :size="18" /></button></div>
           <textarea v-model="link" rows="4" placeholder="ss://、vless://、trojan://、hysteria2:// …"></textarea>
           <div v-if="preview" class="preview-card">
             <div><span>名称</span><strong>{{ preview.tag }}</strong></div>
@@ -1214,7 +1279,8 @@ onBeforeUnmount(() => {
             <div class="node-tools">
               <input v-model="nodeSearch" class="search" placeholder="搜索策略组或节点" />
               <select v-model="nodeSort"><option value="source">配置顺序</option><option value="name">名称排序</option><option value="delay">延迟排序</option></select>
-              <button class="secondary compact" :disabled="testing" @click="testExits(concreteExits.map(item => item.tag))"><Gauge :size="15" />全部测速</button>
+              <button class="secondary compact" :disabled="testing" title="测试全部可见节点" @click="testExits(concreteExits.map(item => item.tag))"><Gauge :size="15" /><span>全部测速</span></button>
+              <button class="secondary compact" :title="allGroupsExpanded ? '收起全部策略组' : '展开全部策略组'" @click="toggleAllGroups"><ChevronsUpDown :size="15" /><span>{{ allGroupsExpanded ? '全部收起' : '全部展开' }}</span></button>
             </div>
           </div>
           <div class="policy-group-grid">
@@ -1226,20 +1292,20 @@ onBeforeUnmount(() => {
                 <div class="group-title"><span class="kind">{{ group.mode === 'manual' ? 'SELECTOR' : 'URLTEST' }}</span><h3>{{ group.tag }}</h3></div>
                 <span v-if="group.default" class="badge">默认</span>
                 <div class="group-health">
-                  <span class="fast">{{ groupStatus(group).available }}</span><span class="failed">{{ groupStatus(group).failed }}</span><span class="untested">{{ groupStatus(group).untested }}</span>
+                  <span class="fast" title="可用节点">{{ groupStatus(group).available }}</span><span class="failed" title="失败节点">{{ groupStatus(group).failed }}</span><span class="untested" title="未测速节点">{{ groupStatus(group).untested }}</span>
                 </div>
               </div>
               <div class="group-current">
                 <span>当前策略</span><strong>{{ group.mode === 'manual' ? group.selected || '未选择' : '自动优选' }}</strong><small>{{ group.members.length }} 个成员 · {{ group.references }} 个引用</small>
               </div>
               <div class="group-actions">
-                <select :value="group.mode === 'manual' ? group.selected || '' : ''" @change="groupSelectionChange(group, $event)">
+                <select :value="group.mode === 'manual' ? group.selected || '' : ''" :aria-label="`${group.tag} 当前策略`" @change="groupSelectionChange(group, $event)">
                   <option value="">自动优选</option><option v-for="member in group.members" :key="member" :value="member">固定 · {{ member }}</option>
                 </select>
-                <button :disabled="testing" title="组内测速" @click="testExits(group.members)"><Gauge :size="15" /></button>
-                <button v-if="!group.default" @click="setFinal(group.tag)">设为默认</button>
-                <button @click="editGroup(group)">编辑</button>
-                <button @click="openGroupNodes(group)">详情</button>
+                <button :disabled="testing" title="组内测速" @click="testExits(group.members)"><Gauge :size="16" /></button>
+                <button v-if="!group.default" title="设为默认出口" @click="setFinal(group.tag)"><House :size="16" /></button>
+                <button title="编辑组成员" @click="editGroup(group)"><Pencil :size="16" /></button>
+                <button title="查看组内节点" @click="openGroupNodes(group)"><ListTree :size="16" /></button>
               </div>
               <div v-if="isGroupExpanded(group.tag)" class="group-node-grid">
                 <button v-for="node in nodesForGroup(group).slice(0, 80)" :key="node.tag" :class="[{ active: group.selected === node.tag }, delayTone(node.tag)]" @click="setGroupSelection(group, node.tag)">
@@ -1272,9 +1338,9 @@ onBeforeUnmount(() => {
           <div v-if="activeNodeGroup" class="active-group-bar">
             <label>当前策略<select :value="activeNodeGroup.mode === 'manual' ? activeNodeGroup.selected || '' : ''" @change="groupSelectionChange(activeNodeGroup, $event)"><option value="">自动优选</option><option v-for="member in activeNodeGroup.members" :key="member" :value="member">固定 · {{ member }}</option></select></label>
             <span>{{ activeNodeGroup.default ? '默认出口' : `${activeNodeGroup.references} 个引用` }}</span>
-            <button :disabled="testing" @click="testExits(activeNodeGroup.members)"><Gauge :size="14" />组内测速</button>
-            <button v-if="!activeNodeGroup.default" @click="setFinal(activeNodeGroup.tag)">设为默认</button>
-            <button @click="editGroup(activeNodeGroup)">编辑成员</button>
+            <button :disabled="testing" title="组内测速" @click="testExits(activeNodeGroup.members)"><Gauge :size="16" /></button>
+            <button v-if="!activeNodeGroup.default" title="设为默认出口" @click="setFinal(activeNodeGroup.tag)"><House :size="16" /></button>
+            <button title="编辑组成员" @click="editGroup(activeNodeGroup)"><Pencil :size="16" /></button>
           </div>
           <div class="node-collection" :class="nodeView">
             <article v-for="item in visibleNodes" :key="item.tag" class="node-item" :class="{ selected: item.default, active: activeNodeGroup?.selected === item.tag }">
@@ -1287,10 +1353,10 @@ onBeforeUnmount(() => {
               <span class="node-delay" :class="delayTone(item.tag)">{{ delays[item.tag]?.ok ? `${delays[item.tag].delay} ms` : delays[item.tag] ? '失败' : '未测' }}</span>
               <span class="node-reference">{{ item.references }} 引用</span>
               <div class="row-actions">
-                <button :disabled="testing" @click="testExits([item.tag])">测速</button>
-                <button v-if="activeNodeGroup && activeNodeGroup.selected !== item.tag" @click="setGroupSelection(activeNodeGroup, item.tag)">固定</button>
-                <button v-if="!item.default" @click="setFinal(item.tag)">默认</button>
-                <button v-if="item.deletable" class="text-danger" @click="removeExit(item)"><Trash2 :size="14" /></button>
+                <button :disabled="testing" title="测速" @click="testExits([item.tag])"><Gauge :size="15" /></button>
+                <button v-if="activeNodeGroup && activeNodeGroup.selected !== item.tag" title="固定到当前策略组" @click="setGroupSelection(activeNodeGroup, item.tag)"><Pin :size="15" /></button>
+                <button v-if="!item.default" title="设为默认出口" @click="setFinal(item.tag)"><House :size="15" /></button>
+                <button v-if="item.deletable" class="text-danger" title="删除节点" @click="removeExit(item)"><Trash2 :size="15" /></button>
               </div>
             </article>
             <p v-if="!visibleNodes.length" class="empty">没有匹配的节点</p>

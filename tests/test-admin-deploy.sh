@@ -82,6 +82,12 @@ grep -q 'policy-group-grid' "$ROOT/web/src/App.vue" \
   && grep -q 'rule-provider-grid' "$ROOT/web/src/App.vue" \
   && grep -q 'TwemojiMozilla-flags.woff2' "$ROOT/web/src/styles.css" \
   && ok "节点、订阅与分流工作台已接入" || bad "管理工作台或国旗字体缺失"
+grep -q "pdg-page" "$ROOT/web/src/App.vue" \
+  && grep -q 'toggleAllGroups' "$ROOT/web/src/App.vue" \
+  && grep -q 'node-sheet' "$ROOT/web/src/App.vue" \
+  && grep -q '@media (max-width: 350px)' "$ROOT/web/src/styles.css" \
+  && grep -q '100dvh' "$ROOT/web/src/styles.css" \
+  && ok "移动端偏好、底部面板和极窄屏约束已接入" || bad "移动端工作台约束缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"
