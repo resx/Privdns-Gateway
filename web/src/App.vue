@@ -703,7 +703,7 @@ async function removeExit(item: Exit) {
     )
     const details = [
       impact.final ? '默认出口将自动切换' : '',
-      impact.groups.length ? `影响故障组：${impact.groups.join('、')}` : '',
+      impact.groups.length ? `影响策略组：${impact.groups.join('、')}` : '',
       impact.rules.length ? `迁移 ${impact.rules.length} 条分流引用` : '',
       impact.telegram ? 'Telegram 专用出口将跟随默认出口' : '',
     ].filter(Boolean).join('\n')
@@ -945,7 +945,7 @@ async function saveGroup() {
     editingGroup.value = false
     groupName.value = ''
     groupMembers.value = []
-    flash('故障组已保存')
+    flash('策略组已保存')
     await loadAll()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
@@ -1445,7 +1445,7 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section v-if="showGroup" class="panel add-panel node-sheet">
-          <div class="section-title sheet-title"><div><p class="eyebrow">FAILOVER GROUP</p><h2>故障切换组</h2></div><button class="icon-button sheet-close" title="关闭" @click="showGroup = false"><X :size="18" /></button></div>
+          <div class="section-title sheet-title"><div><p class="eyebrow">POLICY GROUP</p><h2>策略组</h2></div><button class="icon-button sheet-close" title="关闭" @click="showGroup = false"><X :size="18" /></button></div>
           <div class="form-grid group-form">
             <input v-model="groupName" :disabled="editingGroup" placeholder="组名，例如 自动优选、日本节点、Global" />
             <div class="member-picker">
@@ -1454,7 +1454,7 @@ onBeforeUnmount(() => {
                 <span>{{ item.tag }}</span>
               </label>
             </div>
-            <button class="primary" @click="saveGroup">保存故障组</button>
+            <button class="primary" @click="saveGroup">保存策略组</button>
           </div>
         </section>
         <section v-if="showAdd" class="panel add-panel node-sheet">

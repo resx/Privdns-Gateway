@@ -76,7 +76,7 @@ applied.clear(); edited.clear()
 bot.handle_cb(2, 10, "delx:hk")
 assert not applied
 assert "确认删除出口" in edited[-1][2]
-assert "分流引用" in edited[-1][2] and "故障组" in edited[-1][2]
+assert "分流引用" in edited[-1][2] and "策略组" in edited[-1][2]
 assert edited[-1][3]["inline_keyboard"][0][0]["callback_data"] == "delxok:hk"
 
 bot.handle_cb(2, 10, "delxok:hk")

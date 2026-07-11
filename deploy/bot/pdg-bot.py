@@ -130,7 +130,7 @@ def _nav(key):
              {"text": "🗑 删除", "callback_data": "del_exit"}],
             [{"text": "🎯 默认出口", "callback_data": "setfinal"}, {"text": "↕️ 出口排序", "callback_data": "order_exit"},
              {"text": "✏️ 改名", "callback_data": "ren_exit"}],
-            [{"text": "🔀 新建故障组", "callback_data": "add_grp"}, {"text": "✏️ 改故障组", "callback_data": "edit_grp"}]]),
+            [{"text": "🔀 新建策略组", "callback_data": "add_grp"}, {"text": "✏️ 改策略组", "callback_data": "edit_grp"}]]),
         "rule": ("📑 <b>分流管理</b> — 选一项:", [
             [{"text": "📋 规则", "callback_data": "rules"}, {"text": "➕ 加规则", "callback_data": "add_rule"},
              {"text": "🗑 删规则", "callback_data": "del_rule"}],
@@ -214,12 +214,12 @@ def load():
 def apply_sb(modify):
     return _sb_control.apply(modify)
 
-# ── 故障切换组 (urltest) ──
+# ── 策略组 (urltest / selector) ──
 def add_group(name, members):
     try:
         result = _gateway.save_group(name, members)
-        return True, (f"✅ 故障切换组 <b>{result['tag']}</b> = {' › '.join(result['members'])}\n"
-                      "自动选最快, 成员故障自动切换。可在「🎯 设默认出口」或分流规则里选它。")
+        return True, (f"✅ 策略组 <b>{result['tag']}</b> = {' › '.join(result['members'])}\n"
+                      "默认自动优选, 也可在管理面板固定节点；可作为默认策略或分流目标。")
     except ServiceError as error:
         return False, str(error)
 
@@ -840,7 +840,7 @@ def del_rule_kb(chat, back=RULE_BACK):
     rows.extend(_back_rows(back))
     return items, {"inline_keyboard": rows}
 
-# ── 改分流规则出口 / 出口排序 / 改故障组 ──
+# ── 改分流规则出口 / 出口排序 / 改策略组 ──
 def editable_rules(c):
     """可改出口的规则: [(索引, 简短标签)]。含域名规则与规则集规则。"""
     out = []; meta = _rs_meta()
@@ -900,7 +900,7 @@ def reorder_exits(order):
 
 def rename_exit(old, new):
     """真改名: 改 outbound 的 tag, 并级联更新全部引用 —— 分流规则(含 TG 出口规则)、
-    故障组成员、route.final、规则集元数据的 outbound 记录。direct(模板锚点, WDA 依赖其 tag)不可改。"""
+    策略组成员、route.final、规则集元数据的 outbound 记录。direct(模板锚点, WDA 依赖其 tag)不可改。"""
     c = load()
     if old not in deletable_tags(c):
         return False, f"出口 {old} 不存在或不可改名(direct 出口是模板锚点)"
@@ -935,7 +935,7 @@ def rename_exit(old, new):
             info["outbound"] = new; dirty = True
     if dirty:
         _save_rs_meta(m)
-    return True, f"✅ 出口 <b>{old}</b> 已改名 <b>{new}</b>, 分流规则/故障组/默认出口里的引用已同步。"
+    return True, f"✅ 出口 <b>{old}</b> 已改名 <b>{new}</b>, 分流规则/策略组/默认出口里的引用已同步。"
 
 def urltest_groups(c):
     return [o["tag"] for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
@@ -1266,9 +1266,26 @@ def outbound_preview(ob):
             "不会在消息中显示密码、UUID 或密钥。")
 
 
+def _limited_name_lines(names, limit=40):
+    names = list(names)
+    lines = [f"• <code>{_esc(str(name))}</code>" for name in names[:limit]]
+    if len(names) > limit:
+        lines.append(f"• … 另有 {len(names) - limit} 个")
+    return "\n".join(lines)
+
+
 def _groups_desc(c):
-    g = [o for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
-    return "\n".join(f"🔀 故障组 <b>{o['tag']}</b>: {' › '.join(o.get('outbounds', []))}" for o in g)
+    groups = [o for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
+    lines = []
+    for group in groups:
+        if group.get("type") == "selector":
+            mode = f"固定：{_esc(str(group.get('default') or '未选择'))}"
+        else:
+            mode = "自动优选"
+        members = "\n".join(f"  ↳ <code>{_esc(str(member))}</code>" for member in group.get("outbounds", []))
+        lines.append(f"• <b>{_esc(str(group['tag']))}</b> · {mode}" + (f"\n{members}" if members else ""))
+    return "\n".join(lines)
+
 
 def status_text():
     names = ["mosdns", "sing-box", "pdg-bot", "pdg-admin"]
@@ -1276,35 +1293,40 @@ def status_text():
     _states = dict(zip(names, _st + ["?"] * len(names)))
     def dot(s):
         return "🟢" if _states.get(s) == "active" else "🔴"
-    c = load(); exits = exit_tags(c)
-    g = _groups_desc(c)
+    c = load()
+    concrete = concrete_tags(c)
+    groups = [o for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
     final = c["route"].get("final")
     nrules = sum(1 for r in c["route"]["rules"] if r.get("outbound"))
-    split = "国内直连" + (f" / {nrules} 条分流规则" if nrules else "") + f" / 其余→{final}"
+    split = "国内直连" + (f" / {nrules} 条分流规则" if nrules else "") + f" / 其余→{_esc(str(final))}"
+    group_lines = _groups_desc(c)
     return ("🖥 <b>PrivDNS Gateway</b>\n\n"
             f"{dot('mosdns')} mosdns（DNS 分流, 带缓存）\n"
             f"{dot('sing-box')} sing-box（流量出口）\n"
             f"{dot('pdg-bot')} pdg-bot（快捷管理）\n"
             f"{dot('pdg-admin')} pdg-admin（Web 管理端）\n\n"
-            f"📡 DoT: <code>{_dot_host()}:853</code>（Android 私密DNS / iOS 描述文件）\n"
-            f"🌐 IP: <code>{_server_ip()}</code>\n"
-            f"📤 出口({len(exits)}): {', '.join(exits)}\n"
-            + (g + "\n" if g else "")
-            + f"🎯 默认出口(其余国际): <b>{final}</b>\n"
-            f"📚 规则集: {len(_rs_meta())} 个\n"
-            f"🌏 分流: {split}")
+            f"📡 DoT: <code>{_esc(_dot_host())}:853</code>（Android 私密DNS / iOS 描述文件）\n"
+            f"🌐 IP: <code>{_esc(_server_ip())}</code>\n\n"
+            f"📤 <b>具体出口（{len(concrete)}）</b>\n{_limited_name_lines(concrete)}\n\n"
+            + (f"🔀 <b>策略组（{len(groups)}）</b>\n{group_lines}\n\n" if group_lines else "")
+            + f"🎯 <b>默认策略</b>\n• {_esc(str(final))}（其余流量）\n\n"
+            f"📚 <b>规则集</b>：{len(_rs_meta())} 个\n"
+            f"🌏 <b>分流</b>：{split}")
+
 
 def exits_text():
-    c = load(); lines = []
+    c = load(); concrete_lines = []
     for o in proxy_outbounds(c):
-        lines.append(f'• <b>{o["tag"]}</b>  {o["type"]}  {o.get("server")}:{o.get("server_port")}')
+        endpoint = f"{_esc(str(o.get('server')))}:{o.get('server_port')}"
+        concrete_lines.append(f'• <b>{_esc(str(o["tag"]))}</b>\n  <code>{_esc(str(o["type"]))}</code> · {endpoint}')
     for o in c["outbounds"]:
         if o.get("type") == "direct":
-            lines.append(f'• <b>{o["tag"]}</b>  direct（本机直出）')
-        elif o.get("type") in GROUP_TYPES:
-            mode = f'固定 {o.get("default")}' if o.get("type") == "selector" else "自动优选"
-            lines.append(f'• <b>{o["tag"]}</b>  故障组({mode}) → {" › ".join(o.get("outbounds", []))}')
-    return "出口:\n" + ("\n".join(lines) or "(无)")
+            concrete_lines.append(f'• <b>{_esc(str(o["tag"]))}</b>\n  direct · 本机直出')
+    groups = [o for o in c["outbounds"] if o.get("type") in GROUP_TYPES]
+    sections = [f"📤 <b>具体出口（{len(concrete_lines)}）</b>", "\n".join(concrete_lines) or "(无)"]
+    if groups:
+        sections.extend([f"🔀 <b>策略组（{len(groups)}）</b>", _groups_desc(c)])
+    return "\n\n".join(sections)
 
 def rules_text():
     c = load(); lines = []; m = _rs_meta()
@@ -1397,9 +1419,10 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "已取消添加出口。", EXIT_BACK); return
     if data == "add_grp":
         state[chat] = "add_group"
-        edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」建故障切换组(自动选最快/坏了自动切)。\n"
+        edit(chat, mid, "发「<b>组名 出口1 出口2 …</b>」创建策略组。\n"
+             "默认自动优选，也可在管理面板固定节点。\n"
              f"可选成员: {', '.join(concrete_tags(load()))}\n例: <code>main hk tw us</code>\n"
-             "建好后可在「🎯 设默认出口」或规则里选它。/cancel 取消。", EXIT_BACK); return
+             "建好后可作为默认策略或分流目标。/cancel 取消。", EXIT_BACK); return
     if data == "add_rule":
         state[chat] = "add_rule"
         edit(chat, mid, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n例: <code>netflix.com hk</code> / <code>x.cn direct</code>\n/cancel 取消。", RULE_BACK); return
@@ -1426,8 +1449,8 @@ def handle_cb(chat, mid, data):
     if data == "edit_grp":
         gs = urltest_groups(load())
         if not gs:
-            edit(chat, mid, "还没有故障组, 先用「🔀 新建故障组」建一个。", EXIT_BACK); return
-        edit(chat, mid, "选要改的故障组:", kb_pick("egrp", gs, EXIT_BACK)); return
+            edit(chat, mid, "还没有策略组, 先用「🔀 新建策略组」建一个。", EXIT_BACK); return
+        edit(chat, mid, "选要改的策略组:", kb_pick("egrp", gs, EXIT_BACK)); return
     if data.startswith("egrp:"):
         name = data[5:]; state[chat] = "edit_grp:" + name
         cur = next((o.get("outbounds", []) for o in load()["outbounds"]
@@ -1500,16 +1523,16 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, msg if ok else ("❌ " + msg), MENU); return
     if data == "del_exit":
         tags = deletable_tags(load())
-        edit(chat, mid, "选择要删除的出口/故障组：" if tags else "没有可删的出口",
+        edit(chat, mid, "选择要删除的出口/策略组：" if tags else "没有可删的出口",
              kb_pick("delx", tags, EXIT_BACK) if tags else EXIT_BACK); return
     if data == "ren_exit":
         tags = deletable_tags(load())
-        edit(chat, mid, "选择要改名的出口/故障组：" if tags else "没有可改名的出口",
+        edit(chat, mid, "选择要改名的出口/策略组：" if tags else "没有可改名的出口",
              kb_pick("renx", tags, EXIT_BACK) if tags else EXIT_BACK); return
     if data.startswith("renx:"):
         old = data[5:]; state[chat] = "rename_exit:" + old
         edit(chat, mid, f"发出口 <b>{old}</b> 的新名字(字母/数字/_/./-, 40 字内)。\n"
-             "分流规则、故障组、默认出口里的引用会一并同步。/cancel 取消。", EXIT_BACK); return
+             "分流规则、策略组、默认出口里的引用会一并同步。/cancel 取消。", EXIT_BACK); return
     if data == "setfinal":
         edit(chat, mid, "「其余国际」默认走哪个出口/组：", kb_pick("fin", exit_tags(load()), EXIT_BACK)); return
     if data == "ios":
@@ -1594,7 +1617,7 @@ def handle_cb(chat, mid, data):
         if impact["final"]:
             details.append("• 当前默认出口将自动切换")
         if impact["groups"]:
-            details.append("• 故障组会移除它: " + ", ".join(impact["groups"]))
+            details.append("• 策略组会移除它: " + ", ".join(impact["groups"]))
         if impact["rules"]:
             details.append(f"• {len(impact['rules'])} 条分流引用将跟随默认出口")
         if impact["telegram"]:
@@ -1661,7 +1684,7 @@ def handle_text(chat, text):
             pending_outbound.pop(chat, None); state[chat] = "add_exit"
             send(chat, "发节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行。解析后确认才应用。/cancel 取消。", BACK); return
         if cmd == "/group":
-            state[chat] = "add_group"; send(chat, "发「<b>组名 出口1 出口2 …</b>」建故障切换组。/cancel 取消。", BACK); return
+            state[chat] = "add_group"; send(chat, "发「<b>组名 出口1 出口2 …</b>」创建策略组（默认自动优选）。/cancel 取消。", BACK); return
         if cmd == "/addrule":
             state[chat] = "add_rule"; send(chat, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>。/cancel 取消。", BACK); return
         if cmd == "/delrule":

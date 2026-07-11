@@ -982,10 +982,10 @@ class GatewayService:
     def save_group(self, name: str, members: list[str]) -> dict:
         raw_name = name.strip()
         if not raw_name:
-            raise ServiceError("故障组名称不能为空")
+            raise ServiceError("策略组名称不能为空")
         name = self._group_tag(raw_name)
         if not isinstance(members, list):
-            raise ServiceError("故障组成员必须是数组")
+            raise ServiceError("策略组成员必须是数组")
         members = list(dict.fromkeys(str(member).strip() for member in members if str(member).strip()))
         config = self.control.load()
         available = concrete_tags(config)
@@ -995,7 +995,7 @@ class GatewayService:
         if unknown:
             raise ServiceError("未知出口: " + ", ".join(unknown))
         if len(members) < 2:
-            raise ServiceError("故障组至少需要两个具体出口")
+            raise ServiceError("策略组至少需要两个具体出口")
 
         def modify(value):
             for index, outbound in enumerate(value["outbounds"]):
@@ -1037,7 +1037,7 @@ class GatewayService:
         config = self.control.load()
         group = next((item for item in config.get("outbounds", []) if item.get("tag") == tag), None)
         if not group or group.get("type") not in GROUP_TYPES:
-            raise ServiceError(f"故障组 {tag} 不存在", 404)
+            raise ServiceError(f"策略组 {tag} 不存在", 404)
         return self.remove_exit(tag)
 
     def _read_direct(self) -> list[str]:

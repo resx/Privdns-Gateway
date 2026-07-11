@@ -67,7 +67,7 @@ sudo ./install.sh
      > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
      > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
-   - **🔀 故障切换组**:多落地自动选最快 / 坏了自动切。
+   - **🔀 策略组**:多个节点默认自动优选，也可固定指定节点；可作为默认策略或分流目标。
 3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。PWA 集成节点订阅与结构化覆写、分类组自动/固定节点、三目标测速、分流与远程规则集、连接和日志、Geosite/项目在线更新。节点订阅支持 Base64/纯 URI 列表和 SIP008，可预览差异并每日自动刷新。管理端要求独立令牌，不是只靠来源 IP。
 4. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
    Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(已有自定义路由的普通 Wi-Fi 自动直连、互不干扰);

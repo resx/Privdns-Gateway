@@ -122,8 +122,11 @@ jobs:
       - name: "bot 测域名规则集显示名回归"
         run: python3 tests/test-domain-label.py
 
-      - name: "出口改名级联回归 (规则/故障组/final/TG 同步)"
+      - name: "出口改名级联回归 (规则/策略组/final/TG 同步)"
         run: python3 tests/test-exit-rename.py
+
+      - name: "Bot 状态与出口信息回归"
+        run: python3 tests/test-bot-status.py
 
       - name: "iOS 描述文件回归 (Wi-Fi 探测判定 + SSID 直连名单)"
         run: python3 tests/test-ios-ssid.py
