@@ -100,6 +100,8 @@ grep -q 'connection-toolbar' "$ROOT/web/src/App.vue" \
   && grep -q 'migrate_rule_priority' "$ROOT/deploy/bot/pdg.sh" \
   && grep -q 'node_aliases' "$ROOT/deploy/bot/pdg_service.py" \
   && grep -q 'resourceWorkspace' "$ROOT/web/src/App.vue" \
+  && grep -q 'notification-region' "$ROOT/web/src/App.vue" \
+  && grep -q 'global-notification' "$ROOT/web/src/styles.css" \
   && grep -q '我的规则集' "$ROOT/web/src/App.vue" \
   && grep -q '我的订阅覆写' "$ROOT/web/src/App.vue" \
   && grep -q 'ruleset-simple-form' "$ROOT/web/src/App.vue" \

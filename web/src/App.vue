@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  Activity, ArrowDown, ArrowUp, ChevronDown, ChevronRight, CircleX, Clock3,
+  Activity, ArrowDown, ArrowUp, CheckCircle2, ChevronDown, ChevronRight, CircleX, Clock3,
   Database, Gauge, House, LocateFixed, Network, Pause,
   Pencil, Pin, Play, Plus, RefreshCw, Route, Search, Server, Settings, Trash2, X,
 } from '@lucide/vue'
@@ -51,6 +51,12 @@ interface Preview {
   tls: boolean
   replacing: boolean
 }
+interface GlobalNotification {
+  id: number
+  kind: 'success' | 'error'
+  message: string
+}
+
 interface DelayResult {
   tag: string
   ok: boolean
@@ -184,7 +190,7 @@ const tokenInput = ref('')
 const page = ref<Page>(storedChoice('pdg-page', ['overview', 'nodes', 'rules', 'resources', 'runtime', 'system'] as const, 'overview'))
 const loading = ref(false)
 const error = ref('')
-const notice = ref('')
+const notifications = ref<GlobalNotification[]>([])
 const overview = ref<Overview | null>(null)
 const exits = ref<Exit[]>([])
 const rules = ref<Rule[]>([])
@@ -594,12 +600,44 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   return payload.data as T
 }
 
-function flash(message: string) {
-  notice.value = message
-  window.setTimeout(() => {
-    if (notice.value === message) notice.value = ''
-  }, 2600)
+let notificationId = 0
+const notificationTimers = new Map<number, number>()
+
+function dismissNotification(id: number) {
+  const timer = notificationTimers.get(id)
+  if (timer !== undefined) window.clearTimeout(timer)
+  notificationTimers.delete(id)
+  notifications.value = notifications.value.filter(item => item.id !== id)
 }
+
+function notify(message: string, kind: GlobalNotification['kind'], duration: number) {
+  const clean = message.trim()
+  if (!clean || notifications.value.some(item => item.kind === kind && item.message === clean)) return
+  const item = { id: ++notificationId, kind, message: clean }
+  notifications.value = [...notifications.value, item]
+  while (notifications.value.length > 4) dismissNotification(notifications.value[0].id)
+  notificationTimers.set(item.id, window.setTimeout(() => dismissNotification(item.id), duration))
+}
+
+function flash(message: string) {
+  notify(message, 'success', 3000)
+}
+
+watch(error, message => {
+  if (!message) return
+  notify(message, 'error', 8000)
+  error.value = ''
+})
+watch(resourcesError, message => {
+  if (!message) return
+  notify(`资源状态不可用：${message}`, 'error', 8000)
+  resourcesError.value = ''
+})
+watch(runtimeError, message => {
+  if (!message) return
+  notify(`连接状态不可用：${message}`, 'error', 8000)
+  runtimeError.value = ''
+})
 
 async function loadAll() {
   if (!token.value) return
@@ -1273,12 +1311,23 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   if (runtimeTimer) window.clearInterval(runtimeTimer)
+  for (const timer of notificationTimers.values()) window.clearTimeout(timer)
+  notificationTimers.clear()
   window.removeEventListener('keydown', handleGlobalKeydown)
   document.body.classList.remove('sheet-open')
 })
 </script>
 
 <template>
+  <div class="notification-region" aria-live="polite" aria-atomic="false">
+    <div v-for="item in notifications" :key="item.id" class="global-notification" :class="item.kind" :role="item.kind === 'error' ? 'alert' : 'status'">
+      <CircleX v-if="item.kind === 'error'" :size="19" />
+      <CheckCircle2 v-else :size="19" />
+      <span>{{ item.message }}</span>
+      <button :aria-label="`关闭通知：${item.message}`" title="关闭通知" @click="dismissNotification(item.id)"><X :size="17" /></button>
+    </div>
+  </div>
+
   <main v-if="!token" class="login-shell">
     <section class="login-card">
       <div class="brand-mark">PDG</div>
@@ -1290,7 +1339,6 @@ onBeforeUnmount(() => {
         <input id="token" v-model="tokenInput" type="password" autocomplete="current-password" placeholder="粘贴 admin token" />
         <button class="primary wide" type="submit">连接网关</button>
       </form>
-      <p v-if="error" class="error-message">{{ error }}</p>
     </section>
   </main>
 
@@ -1316,9 +1364,6 @@ onBeforeUnmount(() => {
         </div>
         <button class="icon-button" :disabled="loading" title="刷新当前页面" @click="refreshCurrentPage"><RefreshCw :size="19" /></button>
       </header>
-
-      <div v-if="error" class="banner error-message"><span>{{ error }}</span><button @click="error = ''">×</button></div>
-      <div v-if="notice" class="toast">{{ notice }}</div>
 
       <template v-if="page === 'overview' && overview">
         <section class="overview-status-strip">
@@ -1672,7 +1717,6 @@ onBeforeUnmount(() => {
           </div>
           <button class="secondary compact" :disabled="resourceBusy === 'subscriptions' || resourceBusy === 'rulesets'" @click="refreshRemoteResources"><RefreshCw :size="15" />刷新远程资源</button>
         </section>
-        <div v-if="resourcesError" class="banner error-message"><span>资源状态不可用：{{ resourcesError }}</span><button @click="resourcesError = ''">×</button></div>
         <section v-if="resourceWorkspace === 'overrides'" class="panel preset-panel">
           <div class="section-title resource-manager-title">
             <div><p class="eyebrow">MY SUBSCRIPTION OVERRIDES</p><h2>我的订阅覆写</h2></div>
@@ -1768,7 +1812,6 @@ onBeforeUnmount(() => {
           <button class="icon-button compact-icon" title="立即刷新" @click="loadRuntime(true)"><RefreshCw :size="17" /></button>
           <button class="icon-button compact-icon danger-icon" title="终止全部连接" @click="closeConnection()"><CircleX :size="18" /></button>
         </section>
-        <div v-if="runtimeError" class="banner error-message"><span>连接状态不可用：{{ runtimeError }}</span><button @click="runtimeError = ''">×</button></div>
         <section v-if="runtime" class="metric-grid runtime-metrics">
           <article><span>活动连接</span><strong>{{ runtime.connections.length }}</strong></article>
           <article><span>会话上传</span><strong>{{ formatBytes(runtime.upload_total) }}</strong></article>
