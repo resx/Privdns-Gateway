@@ -76,18 +76,28 @@ grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \
 grep -q 'subscriptionAdvanced' "$ROOT/web/src/App.vue" \
   && grep -q '完整订阅 URL' "$ROOT/web/src/App.vue" \
   && ok "订阅添加已简化并保留高级设置" || bad "订阅添加基础/高级分层缺失"
-grep -q 'policy-group-grid' "$ROOT/web/src/App.vue" \
+grep -q 'policy-master-detail' "$ROOT/web/src/App.vue" \
+  && grep -q 'mature-rule-list' "$ROOT/web/src/App.vue" \
   && grep -q 'provider-grid' "$ROOT/web/src/App.vue" \
-  && grep -q 'rule-facets' "$ROOT/web/src/App.vue" \
   && grep -q 'rule-provider-grid' "$ROOT/web/src/App.vue" \
   && grep -q 'TwemojiMozilla-flags.woff2' "$ROOT/web/src/styles.css" \
-  && ok "节点、订阅与分流工作台已接入" || bad "管理工作台或国旗字体缺失"
+  && test -f "$ROOT/web/public/third-party/MetaCubeXD-LICENSE.txt" \
+  && test -f "$ROOT/web/public/third-party/Zashboard-LICENSE.txt" \
+  && test -f "$ROOT/deploy/admin/web/third-party/MetaCubeXD-LICENSE.txt" \
+  && test -f "$ROOT/deploy/admin/web/third-party/Zashboard-LICENSE.txt" \
+  && ok "成熟策略组、节点与规则工作台已接入" || bad "管理工作台或第三方许可证缺失"
 grep -q "pdg-page" "$ROOT/web/src/App.vue" \
-  && grep -q 'toggleAllGroups' "$ROOT/web/src/App.vue" \
+  && grep -q 'activePolicyName' "$ROOT/web/src/App.vue" \
   && grep -q 'node-sheet' "$ROOT/web/src/App.vue" \
   && grep -q '@media (max-width: 350px)' "$ROOT/web/src/styles.css" \
   && grep -q '100dvh' "$ROOT/web/src/styles.css" \
   && ok "移动端偏好、底部面板和极窄屏约束已接入" || bad "移动端工作台约束缺失"
+grep -q 'connection-toolbar' "$ROOT/web/src/App.vue" \
+  && grep -q 'connection-details' "$ROOT/web/src/App.vue" \
+  && grep -q 'resourceWorkspace' "$ROOT/web/src/App.vue" \
+  && grep -q 'logSearch' "$ROOT/web/src/App.vue" \
+  && grep -q 'sniff_host' "$ROOT/deploy/bot/pdg_service.py" \
+  && ok "概览、连接、资源与日志工作台已接入" || bad "运行态管理工作台缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"

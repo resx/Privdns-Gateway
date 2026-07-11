@@ -125,8 +125,9 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 - [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat):mosdns Geosite 数据来源。
 - [blackmatrix7/ios_rule_script](https://github.com/blackmatrix7/ios_rule_script) 与 [DustinWin/ruleset_geodata](https://github.com/DustinWin/ruleset_geodata):管理面板规则集预设来源。
 - [Twemoji Mozilla](https://github.com/mozilla/twemoji-colr):管理面板 flags-only 字体来源，字体代码采用 Apache-2.0，图形采用 CC BY 4.0。
+- [MetaCubeX/MetaCubeXD](https://github.com/MetaCubeX/metacubexd) 与 [Zephyruso/Zashboard](https://github.com/Zephyruso/zashboard):管理面板策略组 master-detail、节点选择和规则展开交互的 MIT 授权前端资源来源。
 
-第三方项目和数据遵循各自的开源许可证与使用条款。
+第三方项目和数据遵循各自的开源许可证与使用条款；随 PWA 分发的许可证和改造说明位于 `web/public/third-party/`。
 
 ## 免责声明
 

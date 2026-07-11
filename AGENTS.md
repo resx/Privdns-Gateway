@@ -26,7 +26,7 @@ Run the affected `tests/test-*.py` or `tests/test-*.sh` files for each change. I
 
 ## Coding Style & Naming Conventions
 
-Use four spaces for Python and two for shell. Prefer Bash with `set -euo pipefail` where safe. Use `snake_case` for Python, `UPPER_CASE` for constants, and kebab-case scripts. TypeScript is strict; keep Vue components mobile-first. Validate PWA changes at 320px, 390px, 768px, and desktop widths; dynamic names must wrap or truncate inside their containers, and mobile edit forms must remain within the visual viewport.
+Use four spaces for Python and two for shell. Prefer Bash with `set -euo pipefail` where safe. Use `snake_case` for Python, `UPPER_CASE` for constants, and kebab-case scripts. TypeScript is strict; keep Vue components mobile-first. Validate PWA changes at 320px, 390px, 768px, and desktop widths; dynamic names must wrap or truncate inside their containers, and mobile edit forms must remain within the visual viewport. The policy master-detail and expandable rule interactions adapt MIT-licensed MetaCubeXD and Zashboard resources; preserve `web/public/third-party/` licenses and attribution when changing them.
 
 ## Configuration & Environment
 

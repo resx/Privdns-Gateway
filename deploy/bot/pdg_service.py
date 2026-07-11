@@ -1448,8 +1448,13 @@ class GatewayService:
             metadata = item.get("metadata") or {}
             connections.append({
                 "id": item.get("id"), "host": metadata.get("host") or metadata.get("destinationIP") or "?",
-                "source": metadata.get("sourceIP"), "network": metadata.get("network"),
-                "type": metadata.get("type"), "chains": item.get("chains") or [],
+                "sniff_host": metadata.get("sniffHost"),
+                "destination": metadata.get("destinationIP"), "destination_port": metadata.get("destinationPort"),
+                "source": metadata.get("sourceIP"), "source_port": metadata.get("sourcePort"),
+                "network": metadata.get("network"), "type": metadata.get("type"),
+                "inbound": metadata.get("inboundName") or metadata.get("inboundIP"),
+                "rule": item.get("rule"), "rule_payload": item.get("rulePayload"),
+                "chains": item.get("chains") or [],
                 "upload": item.get("upload", 0), "download": item.get("download", 0),
                 "start": item.get("start"),
             })

@@ -296,12 +296,23 @@ with tempfile.TemporaryDirectory() as directory:
     assert refreshed["count"] == 2
 
     service._clash_request = lambda path, method="GET": ({
-        "connections": [{"id": "c1", "metadata": {"host": "example.com", "network": "tcp"},
-                         "chains": ["new"], "upload": 10, "download": 20}],
+        "connections": [{
+            "id": "c1", "metadata": {
+                "host": "example.com", "sniffHost": "sniff.example.com",
+                "sourceIP": "100.64.0.2", "sourcePort": "51000",
+                "destinationIP": "203.0.113.10", "destinationPort": "443",
+                "network": "tcp", "type": "HTTP", "inboundName": "mixed-in",
+            },
+            "rule": "RuleSet", "rulePayload": "rs_example",
+            "chains": ["new"], "upload": 10, "download": 20,
+        }],
         "uploadTotal": 10, "downloadTotal": 20,
     } if method == "GET" else {})
     runtime = service.list_connections()
-    assert runtime["connections"][0]["host"] == "example.com"
+    connection = runtime["connections"][0]
+    assert connection["host"] == "example.com" and connection["sniff_host"] == "sniff.example.com"
+    assert connection["source_port"] == "51000" and connection["destination_port"] == "443"
+    assert connection["inbound"] == "mixed-in" and connection["rule_payload"] == "rs_example"
     assert service.close_connection("c1") == {"closed": "c1"}
 
     assert service.remove_ruleset(ruleset["tag"])["deleted"] == ruleset["tag"]
