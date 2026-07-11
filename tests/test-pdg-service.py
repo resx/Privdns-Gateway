@@ -80,6 +80,17 @@ with tempfile.TemporaryDirectory() as directory:
         "server_port": 1080, "tls": False, "replacing": False,
     }
     service.add_exit("socks5://u:p@node.example.com:1080#new")
+    service.add_exit("socks5://u:p@manual.example.com:1080#raw", "手动 香港")
+    assert any(item["tag"] == "手动-香港" and item["name_source"] == "手动" for item in service.list_exits())
+    service.save_group("手动节点组", ["new", "手动-香港"])
+    service.set_rule("manual-name.example", "手动-香港")
+    service.set_final("手动-香港")
+    renamed = service.rename_exit("手动-香港", "手动 香港 2")
+    assert renamed["tag"] == "手动-香港-2" and any(item["tag"] == renamed["tag"] for item in service.list_exits())
+    renamed_config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert renamed_config["route"]["final"] == "手动-香港-2"
+    assert any(rule.get("outbound") == "手动-香港-2" for rule in renamed_config["route"]["rules"])
+    assert "手动-香港-2" in next(item for item in renamed_config["outbounds"] if item.get("tag") == "手动节点组")["outbounds"]
     assert any(item["tag"] == "new" for item in service.list_exits())
     service.set_final("new")
     assert service.overview()["default_exit"] == "new"
@@ -154,6 +165,17 @@ with tempfile.TemporaryDirectory() as directory:
     assert sub_meta["overrides"] == overrides
     old_nodes = sub_meta["nodes"]
     assert all(not tag.startswith(saved_sub["id"] + "-") for tag in old_nodes)
+    alias_meta = json.loads(subscription_path.read_text(encoding="utf-8"))
+    alias_config = json.loads(config_path.read_text(encoding="utf-8"))
+    alias_target = next(item for item in alias_config["outbounds"] if item.get("tag") in old_nodes)
+    alias_meta[saved_sub["id"]]["node_aliases"] = {
+        service._outbound_identity(alias_target): "自定义 香港节点",
+    }
+    subscription_path.write_text(json.dumps(alias_meta), encoding="utf-8")
+    aliased_preview = service.preview_subscription(subscription_url)
+    assert any(node["tag"] == "自定义-香港节点" for node in aliased_preview["nodes"])
+    alias_meta[saved_sub["id"]].pop("node_aliases", None)
+    subscription_path.write_text(json.dumps(alias_meta), encoding="utf-8")
     assert service._subscription_tag(
         {"type": "socks", "tag": "节点", "server": "node.example", "server_port": 1080}, {},
     ) == "节点"

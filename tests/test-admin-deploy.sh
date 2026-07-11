@@ -94,6 +94,8 @@ grep -q "pdg-page" "$ROOT/web/src/App.vue" \
   && ok "移动端偏好、底部面板和极窄屏约束已接入" || bad "移动端工作台约束缺失"
 grep -q 'connection-toolbar' "$ROOT/web/src/App.vue" \
   && grep -q 'connection-details' "$ROOT/web/src/App.vue" \
+  && grep -q 'editNodeName' "$ROOT/web/src/App.vue" \
+  && grep -q 'node_aliases' "$ROOT/deploy/bot/pdg_service.py" \
   && grep -q 'resourceWorkspace' "$ROOT/web/src/App.vue" \
   && grep -q 'logSearch' "$ROOT/web/src/App.vue" \
   && grep -q 'sniff_host' "$ROOT/deploy/bot/pdg_service.py" \

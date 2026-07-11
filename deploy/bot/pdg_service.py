@@ -113,8 +113,9 @@ class GatewayService:
                 "source": "subscription", "subscription_id": identifier,
                 "subscription_label": info.get("label") or identifier,
             }
+            aliases = info.get("node_aliases", {}) if isinstance(info.get("node_aliases", {}), dict) else {}
             for tag in info.get("nodes", []):
-                ownership[tag] = {**owner, "source_group": None}
+                ownership[tag] = {**owner, "source_group": None, "custom_name": tag in aliases.values()}
             for group in info.get("groups", []):
                 if group.get("tag"):
                     ownership[group["tag"]] = {**owner, "source_group": group.get("label")}
@@ -135,6 +136,8 @@ class GatewayService:
                 "subscription_id": owner.get("subscription_id"),
                 "subscription_label": owner.get("subscription_label"),
                 "source_group": owner.get("source_group"),
+                "custom_name": bool(owner.get("custom_name", False)),
+                "name_source": "订阅自定义" if owner.get("custom_name") else ("订阅原名" if source == "subscription" else ("系统" if source == "system" else "手动")),
                 "server": self._mask_host(item.get("server")) if item.get("server") else None,
                 "server_port": item.get("server_port"),
                 "tls": bool(item.get("tls", {}).get("enabled")),
@@ -148,6 +151,13 @@ class GatewayService:
             })
         return output
 
+    @staticmethod
+    def _display_name(value: str, fallback: str) -> str:
+        name = normalize_tag(value.strip() or fallback)
+        if name in {"direct", "block", "dns-out"}:
+            raise ServiceError(f"节点名称 {name} 是保留名称")
+        return name
+
     def _outbound_preview(self, outbound: dict) -> dict:
         config = self.control.load()
         return {
@@ -159,12 +169,18 @@ class GatewayService:
             "replacing": any(item.get("tag") == outbound["tag"] for item in config.get("outbounds", [])),
         }
 
-    def preview_link(self, link: str) -> dict:
-        return self._outbound_preview(parse_link(link))
+    def preview_link(self, link: str, name: str = "") -> dict:
+        outbound = parse_link(link)
+        if name.strip():
+            outbound["tag"] = self._display_name(name, str(outbound["tag"]))
+        return self._outbound_preview(outbound)
 
-    def add_outbound(self, outbound: dict) -> dict:
+    def add_outbound(self, outbound: dict, name: str = "") -> dict:
+        outbound = json.loads(json.dumps(outbound))
         if outbound.get("type") not in PROXY_TYPES or not outbound.get("tag"):
             raise ServiceError("出口类型或名称无效")
+        if name.strip():
+            outbound["tag"] = self._display_name(name, str(outbound["tag"]))
         preview = self._outbound_preview(outbound)
 
         def modify(config):
@@ -176,8 +192,8 @@ class GatewayService:
         self._check_result(self.control.apply(modify))
         return preview
 
-    def add_exit(self, link: str) -> dict:
-        return self.add_outbound(parse_link(link))
+    def add_exit(self, link: str, name: str = "") -> dict:
+        return self.add_outbound(parse_link(link), name)
 
     def _subscription_meta(self) -> dict:
         try:
@@ -349,6 +365,20 @@ class GatewayService:
         return hashlib.sha1(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     @staticmethod
+    def _outbound_identity(outbound: dict) -> str:
+        tls = outbound.get("tls") if isinstance(outbound.get("tls"), dict) else {}
+        transport = outbound.get("transport") if isinstance(outbound.get("transport"), dict) else {}
+        identity = {
+            "type": outbound.get("type"), "server": outbound.get("server"),
+            "server_port": outbound.get("server_port"),
+            "tls_server_name": tls.get("server_name"),
+            "transport_type": transport.get("type"),
+            "transport_path": transport.get("path"),
+            "transport_service_name": transport.get("service_name"),
+        }
+        return hashlib.sha1(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    @staticmethod
     def _tag_with_suffix(base: str, suffix: str) -> str:
         while len((base + suffix).encode("utf-8")) > 64:
             base = base[:-1]
@@ -475,6 +505,11 @@ class GatewayService:
         if len(parsed) > 500:
             raise ServiceError("单个订阅最多允许 500 个节点")
 
+        meta = self._subscription_meta()
+        previous = meta.get(identifier, {})
+        aliases = previous.get("node_aliases", {})
+        if not isinstance(aliases, dict):
+            aliases = {}
         selected = []
         for outbound in parsed:
             original_name = str(outbound.get("tag", ""))
@@ -495,8 +530,6 @@ class GatewayService:
         if not selected:
             raise ServiceError("订阅过滤后没有可用节点，未修改现有配置")
 
-        meta = self._subscription_meta()
-        previous = meta.get(identifier, {})
         old_nodes = set(previous.get("nodes", []))
         current_outbounds = self.control.load().get("outbounds", [])
         used: dict[str, str | None] = {
@@ -511,6 +544,10 @@ class GatewayService:
                 if property_name == "tcp_fast_open" and enabled and value.get("type") == "anytls":
                     continue
                 value[property_name] = enabled
+            alias = aliases.get(self._outbound_identity(value))
+            if alias:
+                display_name = self._display_name(str(alias), display_name)
+            value["tag"] = display_name
             tag = self._subscription_tag(value, used)
             if any(item.get("tag") == tag for item in outbounds):
                 continue
@@ -547,6 +584,7 @@ class GatewayService:
             "count": len(outbounds), "skipped": len(errors) + len(parsed) - len(selected),
             "added": added, "updated": updated, "removed": removed,
             "groups": self._subscription_groups(identifier, group_tag, outbounds, named_tags, categories),
+            "node_aliases": {str(key): self._display_name(str(value), "node") for key, value in aliases.items() if str(value).strip()},
             "category_input": self._normalize_categories(categories),
             "override_input": normalized_overrides,
         }
@@ -604,7 +642,7 @@ class GatewayService:
         )
         result = {
             key: value for key, value in prepared.items()
-            if key not in {"url", "outbounds", "label_input", "group_input", "category_input", "override_input"}
+            if key not in {"url", "outbounds", "label_input", "group_input", "category_input", "override_input", "node_aliases"}
         }
         result["custom_label"] = bool(prepared["label_input"])
         result["custom_group"] = bool(prepared["group_input"])
@@ -641,6 +679,10 @@ class GatewayService:
             new_by_digest = {
                 self._outbound_digest(item): item["tag"] for item in prepared["outbounds"]
             }
+            new_by_identity = {}
+            for item in prepared["outbounds"]:
+                identity = self._outbound_identity(item)
+                new_by_identity.setdefault(identity, []).append(item["tag"])
             replacements = {}
             legacy_prefix = identifier + "-"
             for old_tag in old_nodes:
@@ -648,6 +690,10 @@ class GatewayService:
                 if not old_outbound:
                     continue
                 replacement = new_by_digest.get(self._outbound_digest(old_outbound))
+                if not replacement:
+                    identity_matches = new_by_identity.get(self._outbound_identity(old_outbound), [])
+                    if len(identity_matches) == 1:
+                        replacement = identity_matches[0]
                 if not replacement and old_tag.startswith(legacy_prefix):
                     legacy_name = old_tag[len(legacy_prefix):]
                     matches = [tag for tag in new_nodes if tag == legacy_name or tag.startswith(legacy_name)]
@@ -747,6 +793,7 @@ class GatewayService:
                 "include": prepared["include"], "exclude": prepared["exclude"],
                 "group": new_group, "group_input": prepared["group_input"],
                 "groups": [{"tag": item["tag"], "label": item["label"], "count": item["count"]} for item in group_specs],
+                "node_aliases": prepared["node_aliases"],
                 "categories": prepared["category_input"], "overrides": prepared["override_input"],
                 "nodes": sorted(new_nodes), "count": prepared["count"], "skipped": prepared["skipped"],
                 "created_at": previous.get("created_at") or now, "updated_at": now, "last_error": None,
@@ -771,7 +818,7 @@ class GatewayService:
         )
         result = {
             key: value for key, value in prepared.items()
-            if key not in {"url", "outbounds", "label_input", "group_input", "category_input", "override_input"}
+            if key not in {"url", "outbounds", "label_input", "group_input", "category_input", "override_input", "node_aliases"}
         }
         result["custom_label"] = bool(prepared["label_input"])
         result["custom_group"] = bool(prepared["group_input"])
@@ -868,6 +915,54 @@ class GatewayService:
         if tag not in deletable_tags(config):
             raise ServiceError(f"出口 {tag} 不存在或不可删除", 404)
         return outbound_impact(config, tag)
+
+    def rename_exit(self, old_tag: str, new_name: str) -> dict:
+        config = self.control.load()
+        if old_tag not in deletable_tags(config):
+            raise ServiceError(f"出口 {old_tag} 不存在或不可改名", 404)
+        new_tag = self._display_name(new_name, old_tag)
+        if new_tag == old_tag:
+            raise ServiceError("新旧名称相同")
+        if new_tag in exit_tags(config):
+            raise ServiceError(f"名称 {new_tag} 已被占用", 409)
+        target = next(item for item in config.get("outbounds", []) if item.get("tag") == old_tag)
+        identity = self._outbound_identity(target)
+        subscription_id = None
+        meta = self._subscription_meta()
+        for identifier, info in meta.items():
+            if old_tag in info.get("nodes", []):
+                subscription_id = identifier
+                break
+
+        def modify(value):
+            for outbound in value.get("outbounds", []):
+                if outbound.get("tag") == old_tag:
+                    outbound["tag"] = new_tag
+                if outbound.get("type") in GROUP_TYPES:
+                    outbound["outbounds"] = [new_tag if member == old_tag else member for member in outbound.get("outbounds", [])]
+                    if outbound.get("type") == "selector" and outbound.get("default") == old_tag:
+                        outbound["default"] = new_tag
+            route = value.setdefault("route", {})
+            if route.get("final") == old_tag:
+                route["final"] = new_tag
+            for rule in route.setdefault("rules", []):
+                if rule.get("outbound") == old_tag:
+                    rule["outbound"] = new_tag
+            for outbound in value.get("outbounds", []):
+                if outbound.get("detour") == old_tag:
+                    outbound["detour"] = new_tag
+
+        self._check_result(self.control.apply(modify))
+        if subscription_id:
+            info = meta[subscription_id]
+            info["nodes"] = [new_tag if tag == old_tag else tag for tag in info.get("nodes", [])]
+            for group in info.get("groups", []):
+                group["tag"] = new_tag if group.get("tag") == old_tag else group.get("tag")
+                group["members"] = [new_tag if tag == old_tag else tag for tag in group.get("members", [])]
+            aliases = info.setdefault("node_aliases", {})
+            aliases[identity] = new_tag
+            self._save_subscription_meta(meta)
+        return {"old": old_tag, "tag": new_tag, "name_source": "订阅自定义" if subscription_id else "手动"}
 
     def remove_exit(self, tag: str) -> dict:
         if tag not in deletable_tags(self.control.load()):

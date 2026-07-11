@@ -23,8 +23,8 @@ class FakeService:
 
     def overview(self): return {"default_exit": "jp"}
     def list_exits(self): return [{"tag": "jp"}]
-    def preview_link(self, link): self.calls.append(("preview", link)); return {"tag": "new"}
-    def add_exit(self, link): self.calls.append(("add", link)); return {"tag": "new"}
+    def preview_link(self, link, name=""): self.calls.append(("preview", link, name)); return {"tag": name or "new"}
+    def add_exit(self, link, name=""): self.calls.append(("add", link, name)); return {"tag": name or "new"}
     def test_exits(self, tags=None, target="google"):
         self.calls.append(("test-exits", tags, target)); return [{"tag": "jp", "ok": True, "delay": 8}]
     def set_final(self, tag): self.calls.append(("final", tag)); return {"default_exit": tag}
@@ -61,6 +61,7 @@ class FakeService:
     def check_project_update(self): self.calls.append(("check-project",)); return {"update_available": True}
     def start_project_update(self): self.calls.append(("update-project",)); return {"accepted": True}
     def exit_impact(self, tag): self.calls.append(("impact", tag)); return {"groups": [], "rules": []}
+    def rename_exit(self, tag, name): self.calls.append(("rename", tag, name)); return {"old": tag, "tag": name}
     def remove_exit(self, tag): self.calls.append(("delete", tag)); return {"deleted": tag}
 
 
@@ -103,12 +104,14 @@ with tempfile.TemporaryDirectory() as directory:
         assert headers["Cache-Control"] == "no-store"
         assert headers["X-Frame-Options"] == "DENY"
 
-        status, _, payload = request(port, "POST", "/api/v1/exits/preview", token, {"link": "socks5://x"})
-        assert status == 200 and json.loads(payload)["data"]["tag"] == "new"
-        assert service.calls[-1] == ("preview", "socks5://x")
+        status, _, payload = request(port, "POST", "/api/v1/exits/preview", token, {"link": "socks5://x", "name": "香港节点"})
+        assert status == 200 and json.loads(payload)["data"]["tag"] == "香港节点"
+        assert service.calls[-1] == ("preview", "socks5://x", "香港节点")
 
         status, _, _ = request(port, "GET", "/api/v1/exits/hk%20one/impact", token)
         assert status == 200 and service.calls[-1] == ("impact", "hk one")
+        status, _, _ = request(port, "PUT", "/api/v1/exits/hk%20one", token, {"name": "香港节点"})
+        assert status == 200 and service.calls[-1] == ("rename", "hk one", "香港节点")
         status, _, _ = request(port, "DELETE", "/api/v1/exits/hk%20one", token)
         assert status == 200 and service.calls[-1] == ("delete", "hk one")
 

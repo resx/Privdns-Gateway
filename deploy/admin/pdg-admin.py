@@ -92,9 +92,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         if method == "GET" and path == "/api/v1/exits":
             return self.service.list_exits()
         if method == "POST" and path == "/api/v1/exits/preview":
-            return self.service.preview_link(str(self._body().get("link", "")))
+            body = self._body()
+            return self.service.preview_link(str(body.get("link", "")), str(body.get("name", "")))
         if method == "POST" and path == "/api/v1/exits":
-            return self.service.add_exit(str(self._body().get("link", "")))
+            body = self._body()
+            return self.service.add_exit(str(body.get("link", "")), str(body.get("name", "")))
         if method == "POST" and path == "/api/v1/exits/test":
             body = self._body()
             return self.service.test_exits(body.get("tags"), str(body.get("target", "google")))
@@ -165,6 +167,9 @@ class AdminHandler(BaseHTTPRequestHandler):
                 return self.service.exit_impact(tag)
             if not tail or "/" in tail:
                 raise ServiceError("出口名称无效")
+            if method == "PUT":
+                body = self._body()
+                return self.service.rename_exit(tail, str(body.get("name", "")))
             if method == "DELETE":
                 return self.service.remove_exit(tail)
 

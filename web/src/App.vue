@@ -23,6 +23,8 @@ interface Exit {
   subscription_id: string | null
   subscription_label: string | null
   source_group: string | null
+  custom_name?: boolean
+  name_source?: string
   server: string | null
   server_port: number | null
   tls: boolean
@@ -195,6 +197,10 @@ const runtimeUpdatedAt = ref<Date | null>(null)
 const logs = ref<string[]>([])
 const testing = ref(false)
 const showAdd = ref(false)
+const showRename = ref(false)
+const renamingExit = ref<Exit | null>(null)
+const newExitName = ref('')
+const manualName = ref('')
 const link = ref('')
 const preview = ref<Preview | null>(null)
 const search = ref('')
@@ -246,6 +252,9 @@ const subscriptionPreview = ref<SubscriptionPreview | null>(null)
 const testTarget = ref('google')
 const resources = ref<Resources | null>(null)
 const resourceBusy = ref('')
+const subscriptionBusy = ref('')
+const testingTags = ref<string[]>([])
+const ruleBusy = ref('')
 const resourcesError = ref('')
 const resourceWorkspace = ref(storedChoice('pdg-resource-workspace', ['status', 'rulesets', 'overrides'] as const, 'status'))
 const logSearch = ref('')
@@ -294,6 +303,9 @@ const policyTypeFacets = computed(() => {
   for (const node of activePolicyNodes.value) counts.set(node.type, (counts.get(node.type) || 0) + 1)
   return [...counts.entries()].map(([name, count]) => ({ name, count }))
 })
+const policyFiltersActive = computed(() => Boolean(policyKeyword.value || policyRegion.value !== 'all' || policyType.value !== 'all'))
+const nodeFiltersActive = computed(() => Boolean(nodeSearch.value || nodeStatusFilter.value !== 'all' || nodeSourceFilter.value !== 'all'))
+const ruleFiltersActive = computed(() => Boolean(search.value || ruleKindFilter.value !== 'all' || ruleTargetFilter.value !== 'all'))
 const displayPolicyNodes = computed(() => {
   const query = policyKeyword.value.trim().toLowerCase()
   return activePolicyNodes.value.filter(node => {
@@ -302,7 +314,7 @@ const displayPolicyNodes = computed(() => {
     return !query || `${node.tag} ${node.type} ${node.subscription_label || ''}`.toLowerCase().includes(query)
   })
 })
-const nodeSheetOpen = computed(() => showSubscription.value || showGroup.value || showAdd.value)
+const nodeSheetOpen = computed(() => showSubscription.value || showGroup.value || showAdd.value || showRename.value)
 watch(nodeSheetOpen, value => document.body.classList.toggle('sheet-open', value))
 const nodeHealth = computed(() => {
   const output = { available: 0, failed: 0, untested: 0 }
@@ -364,13 +376,55 @@ function closeNodeSheets() {
   showSubscription.value = false
   showGroup.value = false
   showAdd.value = false
+  showRename.value = false
+  renamingExit.value = null
 }
 
 function openAddNode() {
   const opening = !showAdd.value
   closeNodeSheets()
   preview.value = null
+  manualName.value = ''
   showAdd.value = opening
+}
+
+function editNodeName(item: Exit) {
+  closeNodeSheets()
+  renamingExit.value = item
+  newExitName.value = item.tag
+  showRename.value = true
+}
+
+async function saveNodeName() {
+  if (!renamingExit.value || !newExitName.value.trim()) return
+  try {
+    await api(`/api/v1/exits/${encodeURIComponent(renamingExit.value.tag)}`, {
+      method: 'PUT', body: JSON.stringify({ name: newExitName.value.trim() }),
+    })
+    flash(`${renamingExit.value.tag} 已改名`)
+    closeNodeSheets()
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+function clearPolicyFilters() {
+  policyKeyword.value = ''
+  policyRegion.value = 'all'
+  policyType.value = 'all'
+}
+
+function clearNodeFilters() {
+  nodeSearch.value = ''
+  nodeStatusFilter.value = 'all'
+  nodeSourceFilter.value = 'all'
+}
+
+function clearRuleFilters() {
+  search.value = ''
+  ruleKindFilter.value = 'all'
+  ruleTargetFilter.value = 'all'
 }
 
 function delayTone(tag: string) {
@@ -601,7 +655,7 @@ async function previewExit() {
   error.value = ''
   try {
     preview.value = await api<Preview>('/api/v1/exits/preview', {
-      method: 'POST', body: JSON.stringify({ link: link.value.trim() }),
+      method: 'POST', body: JSON.stringify({ link: link.value.trim(), name: manualName.value.trim() }),
     })
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
@@ -612,9 +666,10 @@ async function addExit() {
   loading.value = true
   error.value = ''
   try {
-    await api('/api/v1/exits', { method: 'POST', body: JSON.stringify({ link: link.value.trim() }) })
+    await api('/api/v1/exits', { method: 'POST', body: JSON.stringify({ link: link.value.trim(), name: manualName.value.trim() }) })
     showAdd.value = false
     link.value = ''
+    manualName.value = ''
     preview.value = null
     flash('出口已应用')
     await loadAll()
@@ -663,6 +718,7 @@ async function removeExit(item: Exit) {
 
 async function testExits(tags?: string[]) {
   testing.value = true
+  testingTags.value = tags || concreteExits.value.map(item => item.tag)
   error.value = ''
   try {
     const result = await api<DelayResult[]>('/api/v1/exits/test', {
@@ -673,6 +729,7 @@ async function testExits(tags?: string[]) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     testing.value = false
+    testingTags.value = []
   }
 }
 
@@ -783,6 +840,7 @@ async function saveNodeSubscription() {
 }
 
 async function refreshNodeSubscription(item: Subscription) {
+  subscriptionBusy.value = item.id
   error.value = ''
   try {
     await api(`/api/v1/subscriptions/${encodeURIComponent(item.id)}/refresh`, { method: 'POST', body: '{}' })
@@ -790,10 +848,13 @@ async function refreshNodeSubscription(item: Subscription) {
     await loadAll()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    subscriptionBusy.value = ''
   }
 }
 
 async function refreshAllSubscriptions() {
+  subscriptionBusy.value = 'all'
   error.value = ''
   try {
     const result = await api<{ id: string; ok: boolean; error?: string }[]>('/api/v1/subscriptions/refresh', {
@@ -805,6 +866,8 @@ async function refreshAllSubscriptions() {
     await loadAll()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    subscriptionBusy.value = ''
   }
 }
 
@@ -956,6 +1019,7 @@ async function updateRuleTarget(item: Rule, event: Event) {
 }
 
 async function saveExistingRule(item: Rule, target: string) {
+  ruleBusy.value = `${item.order}-${item.kind}-${item.value}`
   error.value = ''
   try {
     await api('/api/v1/rules', {
@@ -965,6 +1029,8 @@ async function saveExistingRule(item: Rule, target: string) {
     await loadAll()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    ruleBusy.value = ''
   }
 }
 
@@ -1350,7 +1416,7 @@ onBeforeUnmount(() => {
         <section v-if="nodeWorkspace === 'providers'" class="panel subscription-panel">
           <div class="section-title">
             <div><p class="eyebrow">SUBSCRIPTIONS</p><h2>节点订阅</h2></div>
-            <button class="secondary" :disabled="!subscriptions.length" @click="refreshAllSubscriptions">全部刷新</button>
+            <button class="secondary" :disabled="!subscriptions.length || Boolean(subscriptionBusy)" @click="refreshAllSubscriptions"><RefreshCw :size="15" :class="{ spinning: subscriptionBusy === 'all' }" />{{ subscriptionBusy === 'all' ? '刷新中' : '全部刷新' }}</button>
           </div>
           <p v-if="!subscriptions.length" class="empty-state">尚未添加节点订阅</p>
           <div v-else class="provider-grid">
@@ -1360,7 +1426,7 @@ onBeforeUnmount(() => {
                 <div class="provider-count"><strong>{{ item.count }}</strong><span>节点</span></div>
               </div>
               <div class="provider-meta">
-                <span>{{ item.groups.length }} 个策略组</span><span v-if="item.skipped">跳过 {{ item.skipped }}</span><span>{{ formatTime(item.updated_at) }}</span>
+                <span>{{ item.groups.length }} 个策略组</span><span>{{ nodesForSubscription(item.id).filter(node => node.custom_name).length }} 个自定义名称</span><span v-if="item.skipped">跳过 {{ item.skipped }}</span><span>更新于 {{ formatTime(item.updated_at) }}</span>
               </div>
               <p v-if="item.last_error" class="bad provider-error">{{ item.last_error }}</p>
               <div class="provider-node-preview">
@@ -1371,7 +1437,7 @@ onBeforeUnmount(() => {
               </div>
               <div class="provider-actions">
                 <button @click="openSubscriptionNodes(item)">查看节点</button>
-                <button @click="refreshNodeSubscription(item)">刷新</button>
+                <button :disabled="Boolean(subscriptionBusy)" @click="refreshNodeSubscription(item)"><RefreshCw :size="14" :class="{ spinning: subscriptionBusy === item.id }" />{{ subscriptionBusy === item.id ? '刷新中' : '刷新' }}</button>
                 <button @click="editSubscription(item)">配置</button>
                 <button class="text-danger" @click="removeNodeSubscription(item)">删除</button>
               </div>
@@ -1392,8 +1458,8 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section v-if="showAdd" class="panel add-panel node-sheet">
-          <div class="section-title sheet-title"><div><p class="eyebrow">NEW OUTBOUND</p><h2>粘贴节点链接</h2></div><button class="icon-button sheet-close" title="关闭" @click="showAdd = false"><X :size="18" /></button></div>
-          <textarea v-model="link" rows="4" placeholder="ss://、vless://、trojan://、hysteria2:// …"></textarea>
+          <div class="section-title sheet-title"><div><p class="eyebrow">NEW OUTBOUND</p><h2>添加手动节点</h2></div><button class="icon-button sheet-close" title="关闭" @click="showAdd = false"><X :size="18" /></button></div>
+          <div class="manual-node-form"><input v-model="manualName" placeholder="节点名称（留空使用链接中的名称）" @input="preview = null" /><textarea v-model="link" rows="4" placeholder="ss://、vless://、trojan://、hysteria2:// …" @input="preview = null"></textarea></div>
           <div v-if="preview" class="preview-card">
             <div><span>名称</span><strong>{{ preview.tag }}</strong></div>
             <div><span>协议</span><strong>{{ preview.type }}</strong></div>
@@ -1405,6 +1471,12 @@ onBeforeUnmount(() => {
             <button class="secondary" @click="previewExit">解析预览</button>
             <button v-if="preview" class="primary" :disabled="loading" @click="addExit">确认应用</button>
           </div>
+        </section>
+        <section v-if="showRename && renamingExit" class="panel add-panel node-sheet rename-sheet">
+          <div class="section-title sheet-title"><div><p class="eyebrow">NODE NAME</p><h2>修改节点名称</h2></div><button class="icon-button sheet-close" title="关闭" @click="closeNodeSheets"><X :size="18" /></button></div>
+          <div class="rename-summary"><span>{{ renamingExit.name_source || (renamingExit.source === 'subscription' ? '订阅节点' : '手动节点') }}</span><strong>{{ renamingExit.tag }}</strong><small v-if="renamingExit.source === 'subscription'">别名会在订阅刷新后继续保留</small></div>
+          <input v-model="newExitName" maxlength="64" placeholder="新的节点名称" @keyup.enter="saveNodeName" />
+          <div class="form-actions"><button class="secondary" @click="closeNodeSheets">取消</button><button class="primary" :disabled="!newExitName.trim() || newExitName.trim() === renamingExit.tag" @click="saveNodeName">保存名称</button></div>
         </section>
         <section v-if="nodeWorkspace === 'groups'" class="policy-master-detail">
           <nav class="policy-master" aria-label="策略组">
@@ -1419,6 +1491,7 @@ onBeforeUnmount(() => {
               <div class="policy-now"><span>当前</span><strong>{{ activePolicyGroup.mode === 'manual' ? activePolicyGroup.selected || '未选择' : '自动优选' }}</strong><small>{{ activePolicyGroup.members.length }} 个成员 · {{ activePolicyGroup.references }} 个引用</small></div>
               <div class="policy-search"><Search :size="16" /><input v-model="policyKeyword" type="search" placeholder="在当前策略组中搜索" /><span>{{ displayPolicyNodes.length }}/{{ activePolicyNodes.length }}</span><button v-if="policyKeyword" title="清除搜索" @click="policyKeyword = ''"><X :size="14" /></button><button title="定位当前节点" :disabled="!activePolicyGroup.selected" @click="jumpToCurrentPolicyNode()"><LocateFixed :size="17" /></button></div>
               <div class="policy-facets">
+                <div v-if="policyFiltersActive" class="filter-reset-row"><span>筛选</span><button @click="clearPolicyFilters"><X :size="12" />清除筛选</button></div>
                 <div v-if="policyRegionFacets.length > 1"><span>地区</span><button :class="{ active: policyRegion === 'all' }" @click="policyRegion = 'all'">全部</button><button v-for="facet in policyRegionFacets" :key="facet.name" :class="{ active: policyRegion === facet.name }" @click="policyRegion = facet.name">{{ facet.name }} <em>{{ facet.count }}</em></button></div>
                 <div v-if="policyTypeFacets.length > 1"><span>协议</span><button :class="{ active: policyType === 'all' }" @click="policyType = 'all'">全部</button><button v-for="facet in policyTypeFacets" :key="facet.name" :class="{ active: policyType === facet.name }" @click="policyType = facet.name">{{ facet.name }} <em>{{ facet.count }}</em></button></div>
               </div>
@@ -1432,9 +1505,10 @@ onBeforeUnmount(() => {
             <div class="policy-node-list">
               <button v-for="node in displayPolicyNodes" :key="node.tag" :data-policy-node-selected="activePolicyGroup.selected === node.tag" :class="['policy-node-row', delayTone(node.tag), { selected: activePolicyGroup.selected === node.tag }]" @click="setGroupSelection(activePolicyGroup, node.tag)">
                 <span v-if="activePolicyGroup.selected === node.tag" class="selected-mark">✓</span><span v-else-if="nodeNameParts(node.tag).flag" class="node-flag">{{ nodeNameParts(node.tag).flag }}</span><span v-else class="node-placeholder"></span>
-                <span class="policy-node-name"><strong>{{ nodeNameParts(node.tag).name }}</strong><small>{{ node.subscription_label || (node.source === 'system' ? '系统' : '手工') }}</small></span>
+                <span class="policy-node-name"><strong>{{ nodeNameParts(node.tag).name }}</strong><small>{{ node.subscription_label || (node.source === 'system' ? '系统' : '手工') }} · {{ node.name_source || '节点名称' }}</small></span>
                 <span class="policy-node-type">{{ node.type }}</span>
-                <span class="policy-node-delay" @click.stop="testExits([node.tag])">{{ delays[node.tag]?.ok ? `${delays[node.tag].delay} ms` : delays[node.tag] ? '失败' : '测速' }}</span>
+                <span class="policy-node-delay" :class="{ busy: testingTags.includes(node.tag) }" @click.stop="testExits([node.tag])">{{ testingTags.includes(node.tag) ? '测试中' : delays[node.tag]?.ok ? `${delays[node.tag].delay} ms` : delays[node.tag] ? '失败' : '测速' }}</span>
+                <span v-if="node.deletable" class="policy-node-rename" title="修改节点名称" @click.stop="editNodeName(node)"><Pencil :size="14" /></span>
               </button>
               <p v-if="!displayPolicyNodes.length" class="empty">没有匹配的节点</p>
             </div>
@@ -1452,6 +1526,7 @@ onBeforeUnmount(() => {
               <select v-model="nodeStatusFilter"><option value="all">全部状态</option><option value="available">可用</option><option value="failed">失败</option><option value="untested">未测速</option></select>
               <select v-model="nodeSourceFilter"><option value="all">全部来源</option><option v-for="item in subscriptions" :key="item.id" :value="item.id">{{ item.label }}</option></select>
               <select v-model="nodeSort"><option value="source">配置顺序</option><option value="name">名称排序</option><option value="delay">延迟排序</option></select>
+              <button v-if="nodeFiltersActive" class="view-toggle clear-filter" @click="clearNodeFilters"><X :size="14" />清除</button>
               <button class="view-toggle" :class="{ active: nodeView === 'list' }" @click="nodeView = 'list'">列表</button>
               <button class="view-toggle" :class="{ active: nodeView === 'grid' }" @click="nodeView = 'grid'">卡片</button>
             </div>
@@ -1476,6 +1551,7 @@ onBeforeUnmount(() => {
               <div class="row-actions">
                 <button :disabled="testing" title="测速" @click="testExits([item.tag])"><Gauge :size="15" /></button>
                 <button v-if="activeNodeGroup && activeNodeGroup.selected !== item.tag" title="固定到当前策略组" @click="setGroupSelection(activeNodeGroup, item.tag)"><Pin :size="15" /></button>
+                <button v-if="item.deletable" title="修改节点名称" @click="editNodeName(item)"><Pencil :size="15" /></button>
                 <button v-if="!item.default" title="设为默认出口" @click="setFinal(item.tag)"><House :size="15" /></button>
                 <button v-if="item.deletable" class="text-danger" title="删除节点" @click="removeExit(item)"><Trash2 :size="15" /></button>
               </div>
@@ -1526,6 +1602,7 @@ onBeforeUnmount(() => {
             <div class="section-title rules-heading">
               <div><p class="eyebrow">POLICIES</p><h2>规则清单 <span class="muted">{{ filteredRules.length }}</span></h2></div>
               <div class="rule-tools">
+                <button v-if="ruleFiltersActive" class="secondary compact" @click="clearRuleFilters"><X :size="14" />清除筛选</button>
                 <select v-model="ruleSort"><option value="source">配置顺序</option><option value="name">名称排序</option><option value="target">目标排序</option></select>
                 <input v-model="search" class="search" placeholder="搜索规则或目标" />
               </div>
@@ -1536,7 +1613,7 @@ onBeforeUnmount(() => {
                   <button class="rule-expand" :disabled="!ruleTargetGroup(item)" :title="ruleTargetGroup(item) ? '展开目标策略组' : '目标不是策略组'" @click="toggleRulePolicy(item)"><ChevronDown v-if="expandedRuleKey === `${item.order}-${item.kind}-${item.value}`" :size="16" /><ChevronRight v-else :size="16" /></button>
                   <span class="rule-index">{{ item.order + 1 }}</span>
                   <div class="rule-match"><span>{{ item.kind === 'ruleset' ? 'RULE-SET' : item.kind === 'direct' ? 'DIRECT' : 'DOMAIN' }}</span><strong>{{ item.label }}</strong><small v-if="item.label !== item.value">{{ item.value }}</small></div>
-                  <div class="rule-policy-path"><span>目标策略</span><select :value="item.target" @change="updateRuleTarget(item, $event)"><option value="direct">direct</option><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select><small v-if="ruleTargetGroup(item)">{{ ruleTargetGroup(item)?.selected || (ruleTargetGroup(item)?.mode === 'auto' ? '自动优选' : '未选择') }}</small></div>
+                  <div class="rule-policy-path"><span>{{ ruleBusy === `${item.order}-${item.kind}-${item.value}` ? '正在更新' : '目标策略' }}</span><select :disabled="ruleBusy === `${item.order}-${item.kind}-${item.value}`" :value="item.target" @change="updateRuleTarget(item, $event)"><option value="direct">direct</option><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select><small v-if="ruleTargetGroup(item)">{{ ruleTargetGroup(item)?.selected || (ruleTargetGroup(item)?.mode === 'auto' ? '自动优选' : '未选择') }}</small></div>
                   <span class="rule-size">{{ item.count ? `${item.count} 条` : '单条' }}</span>
                   <button v-if="item.kind !== 'ruleset'" class="rule-delete" title="删除规则" @click="removeRule(item)"><Trash2 :size="15" /></button>
                   <button v-else class="rule-provider-link" title="查看规则集" @click="ruleWorkspace = 'providers'"><Database :size="15" /></button>
