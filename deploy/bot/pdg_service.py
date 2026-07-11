@@ -1495,7 +1495,7 @@ class GatewayService:
     def _project_status(self, check_remote: bool = False) -> dict:
         repo = "/opt/privdns-gateway"
         if check_remote:
-            fetched = self._run(["git", "-C", repo, "fetch", "-q", "--prune", "--prune-tags", "--tags", "origin", "main"])
+            fetched = self._run(["git", "-C", repo, "fetch", "-q", "--prune", "--prune-tags", "origin", "main", "+refs/tags/*:refs/tags/*"])
             if fetched.returncode != 0:
                 raise ServiceError("检查项目更新失败: " + ((fetched.stderr or fetched.stdout).strip()[-160:]), 502)
         current_result = self._run(["git", "-C", repo, "describe", "--tags", "--exclude", "*migrate*", "--always"])

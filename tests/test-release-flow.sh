@@ -21,8 +21,8 @@ grep -q 'pdg_fetch_release_tags' "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must share a release-tag fetch helper"
 grep -q 'pdg_latest_release_tag' "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must exclude migration bridge tags from release selection"
-grep -q -- '--prune-tags' "$ROOT/deploy/bot/pdg.sh" \
-  || fail "pdg update must prune rewritten release tags after migration"
+grep -q -- "refs/tags/\*:refs/tags/\*" "$ROOT/deploy/bot/pdg.sh" \
+  || fail "pdg update must explicitly synchronize and prune rewritten release tags"
 grep -q 'fetch -q --unshallow --tags origin main' "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must unshallow old installs before comparing tags"
 
@@ -41,6 +41,20 @@ git -C "$work/repo" tag v2.0.0
 selected=$(REPO_DIR="$work/repo" bash -c "$selector; pdg_latest_release_tag")
 [[ "$selected" == "v2.0.0" ]] \
   || fail "stable release must sort above prereleases, got $selected"
+
+# 模拟旧 v2.4.10 设备：远端已删除旧 tag，本地仍残留；同步后必须删掉旧 tag。
+git init -q --bare "$work/origin.git"
+git -C "$work/repo" remote add origin "$work/origin.git"
+git -C "$work/repo" push -q origin HEAD:refs/heads/main v2.0.0-rc.1
+git -C "$work/repo" tag -d v2.0.0 >/dev/null
+git -C "$work/repo" tag v2.4.10
+fetcher=$(awk '/^pdg_fetch_release_tags\(\)/,/^}/' "$ROOT/deploy/bot/pdg.sh")
+REPO_DIR="$work/repo" bash -c "$fetcher; pdg_fetch_release_tags"
+! git -C "$work/repo" rev-parse -q --verify refs/tags/v2.4.10 >/dev/null \
+  || fail "deleted legacy v2.4.10 tag must be pruned locally"
+selected=$(REPO_DIR="$work/repo" bash -c "$selector; pdg_latest_release_tag")
+[[ "$selected" == "v2.0.0-rc.1" ]] \
+  || fail "migrated client must stay on rc.1, got $selected"
 
 grep -q '_fetch_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must fetch release tags through a helper"

@@ -727,7 +727,7 @@ def _git(*args, t=60):
     return subprocess.run(["git", "-C", PDG_REPO, *args], capture_output=True, text=True, timeout=t)
 
 def _fetch_release_tags():
-    r = _git("fetch", "-q", "--prune", "--prune-tags", "--tags", "origin", "main", t=120)
+    r = _git("fetch", "-q", "--prune", "--prune-tags", "origin", "main", "+refs/tags/*:refs/tags/*", t=120)
     if r.returncode != 0:
         return False, (r.stderr or r.stdout or "git fetch 失败").strip()
     shallow = _git("rev-parse", "--is-shallow-repository")
