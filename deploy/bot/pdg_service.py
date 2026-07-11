@@ -107,15 +107,34 @@ class GatewayService:
     def list_exits(self) -> list[dict]:
         config = self.control.load()
         final = config.get("route", {}).get("final")
+        ownership = {}
+        for identifier, info in self._subscription_meta().items():
+            owner = {
+                "source": "subscription", "subscription_id": identifier,
+                "subscription_label": info.get("label") or identifier,
+            }
+            for tag in info.get("nodes", []):
+                ownership[tag] = {**owner, "source_group": None}
+            for group in info.get("groups", []):
+                if group.get("tag"):
+                    ownership[group["tag"]] = {**owner, "source_group": group.get("label")}
+            if info.get("group"):
+                ownership.setdefault(info["group"], {**owner, "source_group": "全部节点"})
         output = []
         for item in config.get("outbounds", []):
             tag = item.get("tag")
             if tag not in exit_tags(config):
                 continue
             impact = outbound_impact(config, tag)
+            owner = ownership.get(tag, {})
+            source = owner.get("source") or ("system" if item.get("type") == "direct" else "manual")
             output.append({
                 "tag": tag,
                 "type": item.get("type"),
+                "source": source,
+                "subscription_id": owner.get("subscription_id"),
+                "subscription_label": owner.get("subscription_label"),
+                "source_group": owner.get("source_group"),
                 "server": self._mask_host(item.get("server")) if item.get("server") else None,
                 "server_port": item.get("server_port"),
                 "tls": bool(item.get("tls", {}).get("enabled")),
@@ -1215,7 +1234,7 @@ class GatewayService:
         config = self.control.load()
         meta = self._ruleset_meta()
         rules = []
-        for item in config.get("route", {}).get("rules", []):
+        for route_index, item in enumerate(config.get("route", {}).get("rules", [])):
             target = item.get("outbound")
             if not target:
                 continue
@@ -1225,14 +1244,18 @@ class GatewayService:
                 rules.append({
                     "kind": "ruleset", "value": name,
                     "label": info.get("label") or name, "target": target,
-                    "count": info.get("count"),
+                    "count": info.get("count"), "order": route_index,
                 })
                 continue
             for domain in item.get("domain_suffix", []) + item.get("domain", []):
-                rules.append({"kind": "domain", "value": domain, "label": domain, "target": target})
+                rules.append({
+                    "kind": "domain", "value": domain, "label": domain,
+                    "target": target, "order": route_index,
+                })
+        direct_offset = len(config.get("route", {}).get("rules", []))
         rules.extend(
-            {"kind": "direct", "value": domain, "label": domain, "target": "direct"}
-            for domain in self._read_direct()
+            {"kind": "direct", "value": domain, "label": domain, "target": "direct", "order": direct_offset + index}
+            for index, domain in enumerate(self._read_direct())
         )
         return rules
 

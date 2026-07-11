@@ -166,6 +166,11 @@ with tempfile.TemporaryDirectory() as directory:
     assert all(any(item.get("tag") == group["tag"] for item in current["outbounds"]) for group in sub_meta["groups"])
     owned_nodes = [item for item in current["outbounds"] if item.get("tag") in old_nodes]
     assert all(item.get("tcp_fast_open") is True and item.get("udp_fragment") is True for item in owned_nodes)
+    listed_exits = service.list_exits()
+    listed_owned = [item for item in listed_exits if item["tag"] in old_nodes]
+    assert all(item["source"] == "subscription" and item["subscription_id"] == saved_sub["id"]
+               and item["subscription_label"] == "机场 A" for item in listed_owned)
+    assert next(item for item in listed_exits if item["tag"] == "hk")["source"] == "manual"
     anytls = {"type": "anytls", "tag": "AnyTLS", "server": "node.example", "server_port": 443}
     service._fetch_subscription = lambda url: (base64.urlsafe_b64encode(
         b"anytls://password@node.example:443#AnyTLS"
@@ -265,6 +270,7 @@ with tempfile.TemporaryDirectory() as directory:
     rules = service.list_rules()
     hits = [item for item in rules if item["value"] == "video.example"]
     assert len(hits) == 1 and hits[0]["target"] == "jp"
+    assert all(isinstance(item["order"], int) for item in rules)
 
     service.set_rule("local.example", "direct")
     assert "local.example" in direct_path.read_text(encoding="utf-8")

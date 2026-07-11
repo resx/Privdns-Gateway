@@ -76,10 +76,12 @@ grep -q '/api/v1/subscriptions' "$ROOT/web/src/App.vue" \
 grep -q 'subscriptionAdvanced' "$ROOT/web/src/App.vue" \
   && grep -q '完整订阅 URL' "$ROOT/web/src/App.vue" \
   && ok "订阅添加已简化并保留高级设置" || bad "订阅添加基础/高级分层缺失"
-grep -q 'node-workbench' "$ROOT/web/src/App.vue" \
-  && grep -q 'policy-overview' "$ROOT/web/src/App.vue" \
-  && grep -q 'ruleKindFilter' "$ROOT/web/src/App.vue" \
-  && ok "节点与分流工作台已接入" || bad "节点或分流工作台缺失"
+grep -q 'policy-group-grid' "$ROOT/web/src/App.vue" \
+  && grep -q 'provider-grid' "$ROOT/web/src/App.vue" \
+  && grep -q 'rule-facets' "$ROOT/web/src/App.vue" \
+  && grep -q 'rule-provider-grid' "$ROOT/web/src/App.vue" \
+  && grep -q 'TwemojiMozilla-flags.woff2' "$ROOT/web/src/styles.css" \
+  && ok "节点、订阅与分流工作台已接入" || bad "管理工作台或国旗字体缺失"
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $fail"
