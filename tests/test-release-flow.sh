@@ -46,6 +46,12 @@ grep -q '_fetch_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must fetch release tags through a helper"
 grep -q '_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must exclude migration bridge tags"
+grep -q -- "--exclude.*migrate" "$ROOT/deploy/bot/pdg-bot.py" \
+  || fail "bot current version must not display the migration bridge tag"
+grep -q -- "--exclude.*migrate" "$ROOT/deploy/bot/pdg.sh" \
+  || fail "pdg status must not display the migration bridge tag"
+grep -q -- "--exclude.*migrate" "$ROOT/deploy/bot/pdg_service.py" \
+  || fail "PWA project status must not display the migration bridge tag"
 grep -q -- '--prune-tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must prune rewritten release tags"
 grep -q 'mb.returncode == 0' "$ROOT/deploy/bot/pdg-bot.py" \

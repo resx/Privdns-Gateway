@@ -755,7 +755,7 @@ def update_check():
         ok, err = _fetch_release_tags()
         if not ok:
             return False, f"检查更新失败: {err}"
-        cur = _git("describe", "--tags", "--always").stdout.strip()
+        cur = _git("describe", "--tags", "--exclude", "*migrate*", "--always").stdout.strip()
         tags = _release_tags()
     except Exception as e:  # noqa: BLE001
         return False, f"检查更新失败: {e}"

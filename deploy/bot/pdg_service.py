@@ -1495,15 +1495,25 @@ class GatewayService:
     def _project_status(self, check_remote: bool = False) -> dict:
         repo = "/opt/privdns-gateway"
         if check_remote:
-            fetched = self._run(["git", "-C", repo, "fetch", "-q", "--tags", "origin", "main"])
+            fetched = self._run(["git", "-C", repo, "fetch", "-q", "--prune", "--prune-tags", "--tags", "origin", "main"])
             if fetched.returncode != 0:
                 raise ServiceError("检查项目更新失败: " + ((fetched.stderr or fetched.stdout).strip()[-160:]), 502)
-        current_result = self._run(["git", "-C", repo, "describe", "--tags", "--always"])
-        tags_result = self._run(["git", "-C", repo, "tag", "-l", "v*", "--sort=-v:refname"])
+        current_result = self._run(["git", "-C", repo, "describe", "--tags", "--exclude", "*migrate*", "--always"])
+        tags_result = self._run(["git", "-C", repo, "tag", "-l", "v*"])
         if current_result.returncode != 0:
             return {"current": "unknown", "latest": None, "update_available": False}
         current = current_result.stdout.strip() or "unknown"
-        latest = next(iter(tags_result.stdout.splitlines()), None) if tags_result.returncode == 0 else None
+        latest = None
+        if tags_result.returncode == 0:
+            stages = {"alpha": 0, "beta": 1, "rc": 2, None: 3}
+            parsed = []
+            for tag in tags_result.stdout.splitlines():
+                match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?", tag)
+                if match:
+                    major, minor, patch, stage, number = match.groups()
+                    parsed.append(((int(major), int(minor), int(patch), stages[stage], int(number or 0)), tag))
+            if parsed:
+                latest = max(parsed)[1]
         update_available = False
         if latest:
             head = self._run(["git", "-C", repo, "rev-parse", "HEAD"])

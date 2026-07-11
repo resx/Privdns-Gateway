@@ -53,7 +53,7 @@ cmd_status(){
   local ports
   ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090|9443)\b' | sed 's/^://' | sort -u | sed 's/^9090$/9090(local clash_api)/' | sed 's/^9443$/9443(admin HTTPS)/' | tr '\n' ' ')
   echo "  监听端口     $ports"
-  if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)"; fi
+  if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --exclude '*migrate*' --always 2>/dev/null)"; fi
 }
 
 cmd_doctor(){ python3 /opt/pdg-bot/doctor.py "$@"; }
@@ -466,7 +466,7 @@ cmd_update(){
   if [[ "${1:-}" == "--dry-run" ]]; then
     [[ -d "$REPO_DIR/.git" ]] && pdg_fetch_release_tags "$REPO_DIR" 2>/dev/null
     local tgt; tgt=$(pdg_latest_release_tag "$REPO_DIR")
-    echo "当前: $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)   最新发布: ${tgt:-(无 tag)}"
+    echo "当前: $(git -C "$REPO_DIR" describe --tags --exclude '*migrate*' --always 2>/dev/null)   最新发布: ${tgt:-(无 tag)}"
     [[ -n "$tgt" ]] && { echo "待更新提交(HEAD..$tgt):"; git -C "$REPO_DIR" log --oneline "HEAD..$tgt" 2>/dev/null || echo "  (已是最新或无法比较)"; }
     return 0
   fi
