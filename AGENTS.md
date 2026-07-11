@@ -32,6 +32,10 @@ Use four spaces for Python and two for shell. Prefer Bash with `set -euo pipefai
 
 Noninteractive installs use `PDG_NONINTERACTIVE=1`, server/CIDR/domain values, and optional Bot credentials. `PDG_ADMIN_TOKEN` may preseed the 9443 API token; otherwise installation generates it. Never commit tokens, node credentials, keys, or generated configs. Keep sing-box at 1.12.x; 1.13 removes required destination override behavior.
 
+## Release Versioning
+
+Project releases use SemVer tags. During an unfinished major release, keep the base version fixed and advance `-alpha.N`, `-beta.N`, then `-rc.N`; only tag `vMAJOR.MINOR.PATCH` after stability acceptance. Patch releases contain compatible fixes, minor releases add backward-compatible functionality, and major releases may break compatibility. Do not use version numbers to count features or same-day iterations. Migration bridge tags may support legacy update clients, but canonical release selection must exclude them.
+
 ## Architecture Overview
 
 mosdns is the policy engine, sing-box the data plane, `pdg_service.py` the management layer, Telegram/PWA the control surfaces, and `pdg` the lifecycle layer.

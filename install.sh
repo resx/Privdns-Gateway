@@ -22,11 +22,18 @@ die(){ echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 
 pdg_checkout_latest_tag(){
   local dir="$1" tag cur target
-  git -C "$dir" fetch -q --tags origin main
+  git -C "$dir" fetch -q --prune --prune-tags --tags origin main
   if [[ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
     git -C "$dir" fetch -q --unshallow --tags origin main
   fi
-  tag=$(git -C "$dir" tag -l 'v*' --sort=-v:refname | head -1)
+  # 只选择规范 SemVer 发布 tag；迁移桥接 tag 供旧客户端使用，但不作为新安装版本。
+  tag=$(git -C "$dir" tag -l 'v*' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$' \
+    | sed -E -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1 3 0 &/' \
+      -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$/\1 0 \2 &/' \
+      -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$/\1 1 \2 &/' \
+      -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)$/\1 2 \2 &/' \
+    | sort -k1,1V -k2,2n -k3,3n | tail -1 | awk '{print $4}')
   [[ -n "$tag" ]] || die "仓库没有发布 tag(v*), 中止安装。"
   cur=$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)
   target=$(git -C "$dir" rev-parse "$tag^{commit}" 2>/dev/null || true)

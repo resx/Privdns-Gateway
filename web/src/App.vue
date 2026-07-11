@@ -974,24 +974,31 @@ async function saveRuleset() {
     rulesetUrl.value = ''
     rulesetLabel.value = ''
     flash('规则集已下载并应用')
-    await loadAll()
+    showRulesetComposer.value = false
+    await Promise.all([loadAll(), loadResources()])
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   }
 }
 
-async function updateRuleset(item: Ruleset, target?: string) {
+async function updateRuleset(item: Ruleset, target?: string): Promise<boolean> {
   const label = target === undefined ? window.prompt('规则集显示名称', item.label) : undefined
-  if (target === undefined && label === null) return
+  if (target === undefined && label === null) return false
+  const busyKey = `ruleset-${item.tag}`
+  resourceBusy.value = busyKey
   error.value = ''
   try {
     await api(`/api/v1/rulesets/${encodeURIComponent(item.tag)}`, {
       method: 'PUT', body: JSON.stringify(target === undefined ? { label } : { target }),
     })
     flash('规则集已更新')
-    await loadAll()
+    await Promise.all([loadAll(), loadResources()])
+    return true
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
+    return false
+  } finally {
+    resourceBusy.value = ''
   }
 }
 
@@ -1034,8 +1041,9 @@ async function saveExistingRule(item: Rule, target: string) {
   }
 }
 
-function rulesetTargetChange(item: Ruleset, event: Event) {
-  updateRuleset(item, (event.target as HTMLSelectElement).value)
+async function rulesetTargetChange(item: Ruleset, event: Event) {
+  const select = event.target as HTMLSelectElement
+  if (!await updateRuleset(item, select.value)) select.value = item.target
 }
 
 async function refreshRuleset(item: Ruleset) {
@@ -1043,7 +1051,7 @@ async function refreshRuleset(item: Ruleset) {
   try {
     await api(`/api/v1/rulesets/${encodeURIComponent(item.tag)}/refresh`, { method: 'POST', body: '{}' })
     flash(`${item.label} 已刷新`)
-    await loadAll()
+    await Promise.all([loadAll(), loadResources()])
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   }
@@ -1054,7 +1062,7 @@ async function removeRuleset(item: Ruleset) {
   try {
     await api(`/api/v1/rulesets/${encodeURIComponent(item.tag)}`, { method: 'DELETE' })
     flash('规则集已删除')
-    await loadAll()
+    await Promise.all([loadAll(), loadResources()])
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
   }
@@ -1067,6 +1075,12 @@ async function loadResources() {
   } catch (cause) {
     resourcesError.value = cause instanceof Error ? cause.message : String(cause)
   }
+}
+
+function manageSubscriptionOverride(item?: Subscription) {
+  page.value = 'nodes'
+  nodeWorkspace.value = 'providers'
+  editSubscription(item)
 }
 
 async function applyOverridePreset(preset: OverridePreset) {
@@ -1600,7 +1614,7 @@ onBeforeUnmount(() => {
           </section>
           <section class="panel policy-table-panel">
             <div class="section-title rules-heading">
-              <div><p class="eyebrow">POLICIES</p><h2>规则清单 <span class="muted">{{ filteredRules.length }}</span></h2></div>
+              <div><p class="eyebrow">POLICIES</p><h2>规则清单 <span class="muted">{{ filteredRules.length }}</span></h2><small class="rule-priority-note">用户手动规则优先于规则集</small></div>
               <div class="rule-tools">
                 <button v-if="ruleFiltersActive" class="secondary compact" @click="clearRuleFilters"><X :size="14" />清除筛选</button>
                 <select v-model="ruleSort"><option value="source">配置顺序</option><option value="name">名称排序</option><option value="target">目标排序</option></select>
@@ -1613,7 +1627,7 @@ onBeforeUnmount(() => {
                   <button class="rule-expand" :disabled="!ruleTargetGroup(item)" :title="ruleTargetGroup(item) ? '展开目标策略组' : '目标不是策略组'" @click="toggleRulePolicy(item)"><ChevronDown v-if="expandedRuleKey === `${item.order}-${item.kind}-${item.value}`" :size="16" /><ChevronRight v-else :size="16" /></button>
                   <span class="rule-index">{{ item.order + 1 }}</span>
                   <div class="rule-match"><span>{{ item.kind === 'ruleset' ? 'RULE-SET' : item.kind === 'direct' ? 'DIRECT' : 'DOMAIN' }}</span><strong>{{ item.label }}</strong><small v-if="item.label !== item.value">{{ item.value }}</small></div>
-                  <div class="rule-policy-path"><span>{{ ruleBusy === `${item.order}-${item.kind}-${item.value}` ? '正在更新' : '目标策略' }}</span><select :disabled="ruleBusy === `${item.order}-${item.kind}-${item.value}`" :value="item.target" @change="updateRuleTarget(item, $event)"><option value="direct">direct</option><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select><small v-if="ruleTargetGroup(item)">{{ ruleTargetGroup(item)?.selected || (ruleTargetGroup(item)?.mode === 'auto' ? '自动优选' : '未选择') }}</small></div>
+                  <div class="rule-policy-path"><span>{{ ruleBusy === `${item.order}-${item.kind}-${item.value}` || resourceBusy === `ruleset-${item.value}` ? '正在更新' : '目标策略' }}</span><select :disabled="ruleBusy === `${item.order}-${item.kind}-${item.value}` || resourceBusy === `ruleset-${item.value}`" :value="item.target" @change="updateRuleTarget(item, $event)"><option value="direct">direct</option><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select><small v-if="ruleTargetGroup(item)">{{ ruleTargetGroup(item)?.selected || (ruleTargetGroup(item)?.mode === 'auto' ? '自动优选' : '未选择') }}</small></div>
                   <span class="rule-size">{{ item.count ? `${item.count} 条` : '单条' }}</span>
                   <button v-if="item.kind !== 'ruleset'" class="rule-delete" title="删除规则" @click="removeRule(item)"><Trash2 :size="15" /></button>
                   <button v-else class="rule-provider-link" title="查看规则集" @click="ruleWorkspace = 'providers'"><Database :size="15" /></button>
@@ -1653,21 +1667,29 @@ onBeforeUnmount(() => {
         <section class="workspace-switcher resource-switcher">
           <div class="segmented-control">
             <button :class="{ active: resourceWorkspace === 'status' }" title="资源状态" @click="resourceWorkspace = 'status'">状态 <span>{{ subscriptions.length + rulesets.length + 2 }}</span></button>
-            <button :class="{ active: resourceWorkspace === 'rulesets' }" title="规则图库" @click="resourceWorkspace = 'rulesets'">图库 <span>{{ rulesetPresets.length }}</span></button>
-            <button :class="{ active: resourceWorkspace === 'overrides' }" title="订阅覆写" @click="resourceWorkspace = 'overrides'">覆写 <span>{{ overridePresets.length }}</span></button>
+            <button :class="{ active: resourceWorkspace === 'rulesets' }" title="规则集资源" @click="resourceWorkspace = 'rulesets'">规则集 <span>{{ rulesets.length }}</span></button>
+            <button :class="{ active: resourceWorkspace === 'overrides' }" title="订阅覆写" @click="resourceWorkspace = 'overrides'">覆写 <span>{{ subscriptions.length }}</span></button>
           </div>
           <button class="secondary compact" :disabled="resourceBusy === 'subscriptions' || resourceBusy === 'rulesets'" @click="refreshRemoteResources"><RefreshCw :size="15" />刷新远程资源</button>
         </section>
         <div v-if="resourcesError" class="banner error-message"><span>资源状态不可用：{{ resourcesError }}</span><button @click="resourcesError = ''">×</button></div>
         <section v-if="resourceWorkspace === 'overrides'" class="panel preset-panel">
-          <div class="section-title"><div><p class="eyebrow">SUBSCRIPTION OVERRIDES</p><h2>节点订阅覆写</h2></div></div>
-          <p class="preset-intro">覆写用于整理节点订阅，不是远程脚本。先选择订阅，再套用模板；系统会下载并展示差异，确认后才写入配置。</p>
-          <label class="preset-target">应用到订阅
-            <select v-model="presetSubscriptionId" :disabled="!subscriptions.length">
-              <option v-if="!subscriptions.length" value="">请先在节点页添加订阅</option>
-              <option v-for="item in subscriptions" :key="item.id" :value="item.id">{{ item.label }} · {{ item.count }} 个节点</option>
-            </select>
-          </label>
+          <div class="section-title resource-manager-title">
+            <div><p class="eyebrow">MY SUBSCRIPTION OVERRIDES</p><h2>我的订阅覆写</h2></div>
+            <button class="primary compact" @click="manageSubscriptionOverride()"><Plus :size="15" />添加订阅</button>
+          </div>
+          <p class="preset-intro">覆写跟随节点订阅保存。选择一个订阅即可修改节点筛选、地区分组、协议和网络优化；保存前会先展示差异。</p>
+          <div class="simple-resource-form">
+            <label><span>选择订阅</span><select v-model="presetSubscriptionId" :disabled="!subscriptions.length"><option value="">{{ subscriptions.length ? '请选择' : '暂无订阅' }}</option><option v-for="item in subscriptions" :key="item.id" :value="item.id">{{ item.label }} · {{ item.count }} 个节点</option></select></label>
+            <button class="primary" :disabled="!presetSubscriptionId" @click="manageSubscriptionOverride(subscriptions.find(item => item.id === presetSubscriptionId))">编辑所选覆写</button>
+          </div>
+          <div v-if="subscriptions.length" class="managed-resource-list">
+            <article v-for="item in subscriptions" :key="item.id">
+              <div><strong>{{ item.label }}</strong><small>{{ item.count }} 个节点 · {{ item.overrides.rename.length }} 条重命名 · {{ item.categories.length }} 个分类</small></div>
+              <button class="secondary compact" @click="manageSubscriptionOverride(item)">设置</button>
+            </article>
+          </div>
+          <div class="resource-subheading"><div><span>推荐模板</span><small>先选择订阅，再一键套用；仍需预览确认</small></div></div>
           <div class="preset-grid">
             <article v-for="preset in overridePresets" :key="preset.id" class="preset-card">
               <div><strong>{{ preset.name }}</strong><p>{{ preset.description }}</p></div>
@@ -1676,17 +1698,31 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section v-if="resourceWorkspace === 'rulesets'" class="panel preset-panel">
-          <div class="section-title"><div><p class="eyebrow">RULESET GALLERY</p><h2>常用 GitHub 规则集</h2></div></div>
-          <p class="preset-intro">来源为 <strong>blackmatrix7/ios_rule_script</strong> 和 <strong>DustinWin/ruleset_geodata</strong>。安装前请选择流量出口；下载后仍会经过格式解析、sing-box 校验和失败回滚。</p>
-          <label class="preset-target">规则集出口
-            <select v-model="presetRulesetTarget">
-              <option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }} · {{ item.type }}</option>
-            </select>
-          </label>
+          <div class="section-title resource-manager-title">
+            <div><p class="eyebrow">MY RULESETS</p><h2>我的规则集</h2></div>
+            <button class="primary compact" @click="showRulesetComposer = !showRulesetComposer"><Plus :size="15" />添加规则集</button>
+          </div>
+          <p class="preset-intro">只需填写名称、规则集 URL 和目标策略。系统会先下载校验，成功后才应用，失败不会影响现有配置。</p>
+          <div v-if="showRulesetComposer" class="simple-resource-form ruleset-simple-form">
+            <label><span>名称</span><input v-model="rulesetLabel" placeholder="例如：流媒体" /></label>
+            <label><span>规则集 URL</span><input v-model="rulesetUrl" type="url" placeholder="https://example.com/rules.srs" /></label>
+            <label><span>目标策略</span><select v-model="rulesetTarget"><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }}</option></select></label>
+            <button class="primary" :disabled="!rulesetUrl.trim() || !rulesetTarget" @click="saveRuleset">下载并应用</button>
+          </div>
+          <div v-if="rulesets.length" class="managed-resource-list ruleset-managed-list">
+            <article v-for="item in rulesets" :key="item.tag">
+              <div><strong>{{ item.label }}</strong><small>{{ item.count === null ? '二进制规则集' : `${item.count} 条规则` }} · {{ item.last_error || (item.available ? '正常' : '文件缺失') }}</small></div>
+              <select :value="item.target" aria-label="目标策略" :disabled="resourceBusy === `ruleset-${item.tag}`" @change="rulesetTargetChange(item, $event)"><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select>
+              <div class="managed-resource-actions"><button title="修改名称" @click="updateRuleset(item)">改名</button><button title="重新下载" @click="refreshRuleset(item)">刷新</button><button class="text-danger" title="删除规则集" @click="removeRuleset(item)">删除</button></div>
+            </article>
+          </div>
+          <p v-else class="empty-state">还没有自定义规则集，点击“添加规则集”即可开始。</p>
+          <div class="resource-subheading"><div><span>推荐规则集</span><small>选择目标策略后可一键安装</small></div></div>
+          <label class="preset-target">目标策略<select v-model="presetRulesetTarget"><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }}</option></select></label>
           <div class="preset-grid ruleset-presets">
             <article v-for="preset in rulesetPresets" :key="preset.name" class="preset-card">
               <div><strong>{{ preset.name }}</strong><p>{{ preset.description }}</p></div>
-              <button class="secondary" :disabled="resourceBusy === `preset-${preset.name}`" @click="installRulesetPreset(preset)">下载并应用</button>
+              <button class="secondary" :disabled="resourceBusy === `preset-${preset.name}`" @click="installRulesetPreset(preset)">一键安装</button>
             </article>
           </div>
         </section>

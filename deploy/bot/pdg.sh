@@ -26,10 +26,21 @@ _lock(){
 
 pdg_fetch_release_tags(){
   local dir="${1:-$REPO_DIR}"
-  git -C "$dir" fetch -q --tags origin main || return 1
+  git -C "$dir" fetch -q --prune --prune-tags --tags origin main || return 1
   if [[ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
     git -C "$dir" fetch -q --unshallow --tags origin main || return 1
   fi
+}
+
+pdg_latest_release_tag(){
+  local dir="${1:-$REPO_DIR}"
+  git -C "$dir" tag -l 'v*' \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$' \
+    | sed -E -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1 3 0 &/' \
+      -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)-alpha\.([0-9]+)$/\1 0 \2 &/' \
+      -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)-beta\.([0-9]+)$/\1 1 \2 &/' \
+      -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)$/\1 2 \2 &/' \
+    | sort -k1,1V -k2,2n -k3,3n | tail -1 | awk '{print $4}'
 }
 
 cmd_status(){
@@ -358,6 +369,22 @@ migrate_fw_gms(){
 
 # 老装迁移: 给内网管理端放行 9443/tcp。只追加端口,备份和 nft 校验失败均不动现网。
 # shellcheck disable=SC2120  # $1 仅测试注入
+migrate_rule_priority(){
+  [[ -f /etc/sing-box/config.json && -f /opt/pdg-bot/pdg_service.py ]] || return 0
+  local changed lock_path="/run/privdns-gateway.lock"
+  # pdg update 已持有主锁；子进程改用临时锁，主锁仍会阻挡 Bot/PWA 并发写入。
+  [[ -n "$PDG_LOCKED" ]] && lock_path="/run/privdns-gateway-migration.lock"
+  changed=$(PDG_RULE_LOCK="$lock_path" PYTHONPATH=/opt/pdg-bot python3 - <<'PY'
+import os
+from pdg_control import SingBoxControl
+from pdg_service import GatewayService
+service = GatewayService(control=SingBoxControl(lock_path=os.environ["PDG_RULE_LOCK"]))
+print("yes" if service.migrate_rule_priority()["changed"] else "no")
+PY
+) || { c_y "手动规则优先级迁移失败，保留原配置。"; return 0; }
+  [[ "$changed" == "yes" ]] && c_g "已将用户手动分流规则调整到规则集之前。"
+}
+
 migrate_fw_admin(){
   local f="${1:-/etc/nftables.conf}" bak
   [[ -f "$f" ]] || return 0
@@ -438,7 +465,7 @@ cmd_update(){
   command -v git >/dev/null || { apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git; }
   if [[ "${1:-}" == "--dry-run" ]]; then
     [[ -d "$REPO_DIR/.git" ]] && pdg_fetch_release_tags "$REPO_DIR" 2>/dev/null
-    local tgt; tgt=$(git -C "$REPO_DIR" tag -l 'v*' --sort=-v:refname 2>/dev/null | head -1)
+    local tgt; tgt=$(pdg_latest_release_tag "$REPO_DIR")
     echo "当前: $(git -C "$REPO_DIR" describe --tags --always 2>/dev/null)   最新发布: ${tgt:-(无 tag)}"
     [[ -n "$tgt" ]] && { echo "待更新提交(HEAD..$tgt):"; git -C "$REPO_DIR" log --oneline "HEAD..$tgt" 2>/dev/null || echo "  (已是最新或无法比较)"; }
     return 0
@@ -450,7 +477,7 @@ cmd_update(){
   if ! pdg_fetch_release_tags "$REPO_DIR"; then
     c_y "拉取发布 tag 失败, 中止更新。"; return 1
   fi
-  local tgt; tgt=$(git -C "$REPO_DIR" tag -l 'v*' --sort=-v:refname | head -1)
+  local tgt; tgt=$(pdg_latest_release_tag "$REPO_DIR")
   if [[ -z "$tgt" ]]; then
     c_y "仓库没有发布 tag(v*), 中止更新。"; return 1
   fi
@@ -488,6 +515,7 @@ cmd_update(){
   migrate_singbox_gms       # 老装: sing-box 补 GMS 推送入站和 mtalk 路由
   migrate_fw_gms            # 老装: 防火墙内网放行集补 5228-5230
   migrate_fw_admin          # 老装: 防火墙内网放行管理端 9443
+  migrate_rule_priority     # 老装: 用户手动域名规则优先于规则集
   ensure_admin_token
 
   # ── 更新后校验门: 任一硬校验失败即回滚到更新前快照 ──
@@ -689,7 +717,7 @@ if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
     *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
-       migrate_singbox_gms || true; migrate_fw_gms || true; migrate_fw_admin || true ;;   # 管理类命令才迁移
+       migrate_singbox_gms || true; migrate_fw_gms || true; migrate_fw_admin || true; migrate_rule_priority || true ;;   # 管理类命令才迁移
   esac
 fi
 

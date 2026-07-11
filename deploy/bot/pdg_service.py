@@ -1212,6 +1212,36 @@ class GatewayService:
             })
         return output
 
+    @staticmethod
+    def prioritize_route_rules(config: dict) -> bool:
+        rules = config.setdefault("route", {}).setdefault("rules", [])
+        original = list(rules)
+        system, manual, rulesets, remaining = [], [], [], []
+        for rule in rules:
+            if rule.get("action") or rule.get("inbound"):
+                system.append(rule)
+            elif "rule_set" not in rule and rule.get("outbound"):
+                manual.append(rule)
+            elif rule.get("rule_set"):
+                rulesets.append(rule)
+            else:
+                remaining.append(rule)
+        rules[:] = system + manual + rulesets + remaining
+        return rules != original
+
+    def migrate_rule_priority(self) -> dict:
+        changed = {"value": False}
+
+        def modify(config):
+            changed["value"] = self.prioritize_route_rules(config)
+
+        config = self.control.load()
+        preview = json.loads(json.dumps(config))
+        if not self.prioritize_route_rules(preview):
+            return {"changed": False}
+        self._check_result(self.control.apply(modify))
+        return {"changed": changed["value"]}
+
     def save_ruleset(self, url: str, target: str, label: str = "") -> dict:
         url = self._ruleset_url(url)
         if target not in exit_tags(self.control.load()):
@@ -1230,10 +1260,8 @@ class GatewayService:
                 route["rule_set"].append({"tag": tag, "type": "local", "format": fmt, "path": path})
                 route.setdefault("rules", [])
                 route["rules"] = [rule for rule in route["rules"] if rule.get("rule_set") != tag]
-                index = 0
-                while index < len(route["rules"]) and (route["rules"][index].get("action") or route["rules"][index].get("inbound")):
-                    index += 1
-                route["rules"].insert(index, {"rule_set": tag, "outbound": target})
+                route["rules"].append({"rule_set": tag, "outbound": target})
+                self.prioritize_route_rules(config)
 
             result = self.control.apply(modify)
             if not result[0]:
@@ -1270,6 +1298,7 @@ class GatewayService:
                     for rule in config.get("route", {}).get("rules", []):
                         if rule.get("rule_set") == tag:
                             rule["outbound"] = target
+                            self.prioritize_route_rules(config)
                             return
                     raise ValueError("规则集路由不存在")
                 self._check_result(self.control.apply(modify))
@@ -1375,17 +1404,17 @@ class GatewayService:
 
         def modify(value):
             self._without_domain_rules(value, domain)
-            if target == "direct":
-                return
-            for rule in value["route"]["rules"]:
-                if rule.get("outbound") == target and "rule_set" not in rule and rule.get("domain_suffix") is not None:
-                    rule["domain_suffix"].append(domain)
-                    return
-            rules = value["route"]["rules"]
-            index = 0
-            while index < len(rules) and (rules[index].get("action") or rules[index].get("inbound")):
-                index += 1
-            rules.insert(index, {"domain_suffix": [domain], "outbound": target})
+            if target != "direct":
+                existing = next((
+                    rule for rule in value["route"]["rules"]
+                    if rule.get("outbound") == target and "rule_set" not in rule
+                    and rule.get("domain_suffix") is not None
+                ), None)
+                if existing:
+                    existing["domain_suffix"].append(domain)
+                else:
+                    value["route"]["rules"].append({"domain_suffix": [domain], "outbound": target})
+            self.prioritize_route_rules(value)
 
         self._check_result(self.control.apply(modify))
         direct = self._read_direct()

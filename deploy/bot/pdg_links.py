@@ -123,12 +123,16 @@ def _b64(value):
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4)).decode("utf-8", "ignore")
 
 
+def _decode_tag(value):
+    return urllib.parse.unquote_plus(str(value or "")).strip()
+
+
 def _parse_ss(link):
     body = link[5:]
     tag = ""
     if "#" in body:
         body, tag = body.split("#", 1)
-        tag = urllib.parse.unquote(tag).strip()
+        tag = _decode_tag(tag)
     body = body.split("?", 1)[0]
     if "@" in body:
         userinfo, hostport = body.rsplit("@", 1)
@@ -220,7 +224,7 @@ def _parse_trojan(link):
     url = urllib.parse.urlparse(link)
     query = _query(url)
     outbound = {
-        "type": "trojan", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "trojan", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or 443,
         "password": urllib.parse.unquote(url.username or ""),
         "tls": _tls_block(query.get("sni") or query.get("peer") or url.hostname,
@@ -237,7 +241,7 @@ def _parse_vless(link):
     url = urllib.parse.urlparse(link)
     query = _query(url)
     outbound = {
-        "type": "vless", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "vless", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or 443, "uuid": url.username,
         "flow": query.get("flow", ""),
     }
@@ -280,7 +284,7 @@ def _parse_hysteria2(link):
     url = urllib.parse.urlparse(link)
     query = _query(url)
     outbound = {
-        "type": "hysteria2", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "hysteria2", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or 443, "password": _userinfo(url),
         "tls": _tls_block(query.get("sni") or query.get("peer") or url.hostname, _insecure(query)),
     }
@@ -293,7 +297,7 @@ def _parse_tuic(link):
     url = urllib.parse.urlparse(link)
     query = _query(url)
     outbound = {
-        "type": "tuic", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "tuic", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or 443,
         "uuid": urllib.parse.unquote(url.username or ""), "password": urllib.parse.unquote(url.password or ""),
         "tls": _tls_block(query.get("sni") or url.hostname, _insecure(query)),
@@ -311,7 +315,7 @@ def _parse_anytls(link):
     url = urllib.parse.urlparse(link)
     query = _query(url)
     return {
-        "type": "anytls", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "anytls", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or 443, "password": _userinfo(url),
         "tls": _tls_block(query.get("sni") or url.hostname, _insecure(query)),
     }
@@ -320,7 +324,7 @@ def _parse_anytls(link):
 def _parse_socks(link):
     url = urllib.parse.urlparse(link)
     outbound = {
-        "type": "socks", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "socks", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or 1080, "version": "5",
     }
     username = urllib.parse.unquote(url.username) if url.username else None
@@ -342,7 +346,7 @@ def _parse_socks(link):
 def _parse_http(link):
     url = urllib.parse.urlparse(link)
     outbound = {
-        "type": "http", "tag": normalize_tag(urllib.parse.unquote(url.fragment), url.hostname, url.port),
+        "type": "http", "tag": normalize_tag(_decode_tag(url.fragment), url.hostname, url.port),
         "server": url.hostname, "server_port": url.port or (443 if url.scheme == "https" else 80),
     }
     if url.username:

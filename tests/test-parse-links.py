@@ -53,6 +53,10 @@ check("Surge ss 行",
 ui = base64.urlsafe_b64encode(b"aes-256-gcm:pass123").decode().rstrip("=")
 check("ss:// (b64 用户信息)", m.parse_link("ss://%s@5.6.7.8:8388#name" % ui),
       type="shadowsocks", server="5.6.7.8", server_port=8388, method="aes-256-gcm", password="pass123")
+check("节点名 + 还原空格", m.parse_link("ss://%s@5.6.7.8:8388#Hong+Kong+01" % ui),
+      type="shadowsocks", tag="Hong-Kong-01")
+check("节点名编码加号保留", m.parse_link(f"ss://{ui}@5.6.7.8:8388#Premium%2BNode"),
+      type="shadowsocks", tag="Premium+Node")
 
 # hysteria2
 check("hysteria2://",
@@ -78,8 +82,8 @@ check("vless:// reality",
 
 check("vless:// reality 默认 uTLS",
       m.parse_link("vless://uuid-10@r.example.com:443?security=reality&pbk=PUBKEY&sid=cd34&"
-                   "sni=www.microsoft.com#REALITY-NO-FP"),
-      type="vless", tls__reality__enabled=True, tls__utls__enabled=True,
+                   "sni=www.microsoft.com#Reality+Hong+Kong"),
+      type="vless", tag="Reality-Hong-Kong", tls__reality__enabled=True, tls__utls__enabled=True,
       tls__utls__fingerprint="chrome")
 
 # vless gRPC: serviceName= 要进 transport.service_name(不是只看 path)

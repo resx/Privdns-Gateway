@@ -512,8 +512,8 @@ def add_ruleset(url, target, label=""):
         cc["route"]["rule_set"] = [r for r in cc["route"]["rule_set"] if r.get("tag") != name]
         cc["route"]["rule_set"].append({"tag": name, "type": "local", "format": fmt, "path": path})
         cc["route"]["rules"] = [r for r in cc["route"]["rules"] if r.get("rule_set") != name]
-        idx = 1 if cc["route"]["rules"] and cc["route"]["rules"][0].get("action") == "reject" else 0
-        cc["route"]["rules"].insert(idx, {"rule_set": name, "outbound": target})
+        cc["route"]["rules"].append({"rule_set": name, "outbound": target})
+        _gateway.prioritize_route_rules(cc)
     ok, msg = apply_sb(mod)
     if ok:
         m = _rs_meta(); m[name] = {"url": url, "outbound": target, "format": fmt,
@@ -727,7 +727,7 @@ def _git(*args, t=60):
     return subprocess.run(["git", "-C", PDG_REPO, *args], capture_output=True, text=True, timeout=t)
 
 def _fetch_release_tags():
-    r = _git("fetch", "-q", "--tags", "origin", "main", t=120)
+    r = _git("fetch", "-q", "--prune", "--prune-tags", "--tags", "origin", "main", t=120)
     if r.returncode != 0:
         return False, (r.stderr or r.stdout or "git fetch 失败").strip()
     shallow = _git("rev-parse", "--is-shallow-repository")
@@ -737,6 +737,18 @@ def _fetch_release_tags():
             return False, (r.stderr or r.stdout or "git fetch --unshallow 失败").strip()
     return True, ""
 
+def _release_tags():
+    """返回按 SemVer 降序排列的规范 tag；迁移桥接 tag 不参与选择。"""
+    parsed = []
+    stages = {"alpha": 0, "beta": 1, "rc": 2, None: 3}
+    for tag in _git("tag", "-l", "v*").stdout.split():
+        match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-(alpha|beta|rc)\.(\d+))?", tag)
+        if match:
+            major, minor, patch, stage, number = match.groups()
+            parsed.append(((int(major), int(minor), int(patch), stages[stage], int(number or 0)), tag))
+    return [tag for _, tag in sorted(parsed, reverse=True)]
+
+
 def update_check():
     """检查是否有更新的发布 tag(只跟 tag, 不拉 main 中间提交)。返回 (有更新?, 文本)。"""
     try:
@@ -744,7 +756,7 @@ def update_check():
         if not ok:
             return False, f"检查更新失败: {err}"
         cur = _git("describe", "--tags", "--always").stdout.strip()
-        tags = _git("tag", "-l", "v*", "--sort=-v:refname").stdout.split()
+        tags = _release_tags()
     except Exception as e:  # noqa: BLE001
         return False, f"检查更新失败: {e}"
     if not tags:
@@ -885,6 +897,7 @@ def reassign_rule(idx, target):
     def mod(cc):
         cc["route"]["rules"][idx]["outbound"] = target
         cc["route"]["rules"] = _merge_domain_rules(cc["route"]["rules"])
+        _gateway.prioritize_route_rules(cc)
     ok, msg = apply_sb(mod)
     return ok, (f"✅ 该规则出口 {old} → {target}" if ok else msg)
 

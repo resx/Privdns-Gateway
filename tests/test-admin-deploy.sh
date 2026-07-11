@@ -95,8 +95,14 @@ grep -q "pdg-page" "$ROOT/web/src/App.vue" \
 grep -q 'connection-toolbar' "$ROOT/web/src/App.vue" \
   && grep -q 'connection-details' "$ROOT/web/src/App.vue" \
   && grep -q 'editNodeName' "$ROOT/web/src/App.vue" \
+  && grep -q 'rule-priority-note' "$ROOT/web/src/App.vue" \
+  && grep -q 'prioritize_route_rules' "$ROOT/deploy/bot/pdg_service.py" \
+  && grep -q 'migrate_rule_priority' "$ROOT/deploy/bot/pdg.sh" \
   && grep -q 'node_aliases' "$ROOT/deploy/bot/pdg_service.py" \
   && grep -q 'resourceWorkspace' "$ROOT/web/src/App.vue" \
+  && grep -q '我的规则集' "$ROOT/web/src/App.vue" \
+  && grep -q '我的订阅覆写' "$ROOT/web/src/App.vue" \
+  && grep -q 'ruleset-simple-form' "$ROOT/web/src/App.vue" \
   && grep -q 'logSearch' "$ROOT/web/src/App.vue" \
   && grep -q 'sniff_host' "$ROOT/deploy/bot/pdg_service.py" \
   && ok "概览、连接、资源与日志工作台已接入" || bad "运行态管理工作台缺失"

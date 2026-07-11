@@ -128,6 +128,9 @@ jobs:
       - name: "Bot 状态与出口信息回归"
         run: python3 tests/test-bot-status.py
 
+      - name: "用户手动分流规则优先级回归"
+        run: python3 tests/test-rule-priority.py
+
       - name: "iOS 描述文件回归 (Wi-Fi 探测判定 + SSID 直连名单)"
         run: python3 tests/test-ios-ssid.py
 

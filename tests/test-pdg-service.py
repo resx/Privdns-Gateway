@@ -282,12 +282,24 @@ with tempfile.TemporaryDirectory() as directory:
     removed_tags = set(old_nodes + [group["tag"] for group in sub_meta["groups"]])
     assert all(item.get("tag") not in removed_tags for item in current["outbounds"])
 
-    # 新域名规则应排在 GMS/reject 系统规则之后，且同域名更新时不重复。
+    # 手动域名规则必须排在系统规则之后、所有规则集之前，重复域名由手动规则优先命中。
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    current["route"]["rules"] = [
+        current["route"]["rules"][0], current["route"]["rules"][1],
+        {"rule_set": "rs_media", "outbound": "hk"},
+        {"domain_suffix": ["existing.example"], "outbound": "new"},
+    ]
+    config_path.write_text(json.dumps(current), encoding="utf-8")
+    assert service.migrate_rule_priority() == {"changed": True}
+    assert service.migrate_rule_priority() == {"changed": False}
     service.set_rule("video.example", "new")
     current = json.loads(config_path.read_text(encoding="utf-8"))
     assert current["route"]["rules"][0].get("inbound")
     assert current["route"]["rules"][1].get("action") == "reject"
-    assert current["route"]["rules"][2] == {"domain_suffix": ["video.example"], "outbound": "new"}
+    assert current["route"]["rules"][2] == {
+        "domain_suffix": ["existing.example", "video.example"], "outbound": "new",
+    }
+    assert current["route"]["rules"][3].get("rule_set") == "rs_media"
     service.set_rule("video.example", "jp")
     rules = service.list_rules()
     hits = [item for item in rules if item["value"] == "video.example"]
@@ -308,10 +320,18 @@ with tempfile.TemporaryDirectory() as directory:
         assert "http/https" in str(error)
     ruleset = service.save_ruleset("https://rules.example/media.list", "new", "媒体")
     assert ruleset["count"] == 2 and ruleset["label"] == "媒体"
+    current = json.loads(config_path.read_text(encoding="utf-8"))
+    manual_indexes = [index for index, rule in enumerate(current["route"]["rules"])
+                      if "rule_set" not in rule and rule.get("domain_suffix")]
+    ruleset_indexes = [index for index, rule in enumerate(current["route"]["rules"]) if rule.get("rule_set")]
+    assert manual_indexes and ruleset_indexes and max(manual_indexes) < min(ruleset_indexes)
     listed = service.list_rulesets()
     saved = next(item for item in listed if item["tag"] == ruleset["tag"])
     assert saved["available"]
     assert service.test_route("www.stream.example")["match"] == "媒体"
+    service.set_rule("www.stream.example", "jp")
+    manual_route = service.test_route("www.stream.example")
+    assert manual_route["target"] == "jp" and manual_route["kind"] == "domain"
     updated = service.update_ruleset(ruleset["tag"], "jp", "视频")
     assert updated["target"] == "jp" and updated["label"] == "视频"
     refreshed = service.refresh_ruleset(ruleset["tag"])
