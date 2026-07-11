@@ -49,6 +49,8 @@ sudo ./install.sh
 
 见 [README](../README.md#装完之后):手机设私密 DNS、bot 加出口/分流、打开内网管理面板、iOS 下发描述文件。
 
+> 从原项目 `v1.1.16` 或其他旧版本迁移时，请先阅读 [原项目迁移指南](MIGRATION-FROM-ORIGINAL.md)。已有安装不要直接运行普通 `install.sh` 覆盖。
+
 管理面板监听 `https://<DoT域名>:9443/`,仅允许 `PDG_INTERNAL_CIDR` 来源,API 还使用 `/etc/privdns-gateway/admin.token` 的 Bearer 令牌。推荐从 bot「📱 客户端 → 🖥 管理面板」进入,或运行 `sudo pdg admin` 显示带令牌链接。该链接等同管理员凭据,不要分享或截图。
 
 默认路由是「**国内直连 / 其余国际从 VPS 直出**」。要把国际流量走你的落地节点,在 bot 里加出口再把 `final` 或具体规则指过去。

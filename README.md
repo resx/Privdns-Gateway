@@ -43,6 +43,8 @@ curl -fsSL https://raw.githubusercontent.com/resx/Privdns-Gateway/main/install.s
 
 入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
 
+> ⚠️ **从原项目 `v1.1.16` 或其他旧版本迁移?** 请先阅读 [原项目迁移指南](docs/MIGRATION-FROM-ORIGINAL.md)。迁移前必须先留快照，不要直接用 `install.sh` 覆盖已有安装。
+
 或克隆后运行(便于先看代码):
 
 ```bash
@@ -113,6 +115,7 @@ sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
 ## 文档
 
 - [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
+- [docs/MIGRATION-FROM-ORIGINAL.md](docs/MIGRATION-FROM-ORIGINAL.md) — 从原项目 `v1.1.16` 等旧版本无损迁移
 - [docs/MANAGEMENT.md](docs/MANAGEMENT.md) — PWA 管理端 / API / 认证 / 前端开发
 - [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
 - [docs/production-notes.md](docs/production-notes.md) — 实战记录与踩坑(sing-box 版本坑、QUIC 自环、ECS、安全加固等)
