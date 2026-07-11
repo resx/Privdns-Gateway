@@ -738,7 +738,7 @@ def _fetch_release_tags():
     return True, ""
 
 def _release_tags():
-    """返回按 SemVer 降序排列的规范 tag；迁移桥接 tag 不参与选择。"""
+    """返回按 SemVer 降序排列的规范 tag，忽略其他标签。"""
     parsed = []
     stages = {"alpha": 0, "beta": 1, "rc": 2, None: 3}
     for tag in _git("tag", "-l", "v*").stdout.split():

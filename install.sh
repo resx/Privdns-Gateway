@@ -26,7 +26,7 @@ pdg_checkout_latest_tag(){
   if [[ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
     git -C "$dir" fetch --unshallow origin main '+refs/tags/*:refs/tags/*'
   fi
-  # 只选择规范 SemVer 发布 tag；迁移桥接 tag 供旧客户端使用，但不作为新安装版本。
+  # 只选择规范 SemVer 发布 tag，忽略其他运维或临时标签。
   tag=$(git -C "$dir" tag -l 'v*' \
     | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.[0-9]+)?$' \
     | sed -E -e 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1 3 0 &/' \

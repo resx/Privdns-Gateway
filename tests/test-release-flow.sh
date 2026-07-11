@@ -20,7 +20,7 @@ grep -q 'git -C "$dir" checkout -q "$tag"' "$ROOT/install.sh" \
 grep -q 'pdg_fetch_release_tags' "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must share a release-tag fetch helper"
 grep -q 'pdg_latest_release_tag' "$ROOT/deploy/bot/pdg.sh" \
-  || fail "pdg update must exclude migration bridge tags from release selection"
+  || fail "pdg update must exclude non-SemVer tags from release selection"
 grep -q -- "refs/tags/\*:refs/tags/\*" "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must explicitly synchronize and prune rewritten release tags"
 grep -q "fetch --unshallow origin main '+refs/tags/\*:refs/tags/\*'" "$ROOT/deploy/bot/pdg.sh" \
@@ -68,13 +68,13 @@ REPO_DIR="$work/shallow" bash -c "$fetcher; pdg_fetch_release_tags"
 grep -q '_fetch_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must fetch release tags through a helper"
 grep -q '_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
-  || fail "bot update check must exclude migration bridge tags"
+  || fail "bot update check must exclude non-SemVer tags"
 grep -q -- "--exclude.*migrate" "$ROOT/deploy/bot/pdg-bot.py" \
-  || fail "bot current version must not display the migration bridge tag"
+  || fail "bot current version must not display non-release tags"
 grep -q -- "--exclude.*migrate" "$ROOT/deploy/bot/pdg.sh" \
-  || fail "pdg status must not display the migration bridge tag"
+  || fail "pdg status must not display non-release tags"
 grep -q -- "--exclude.*migrate" "$ROOT/deploy/bot/pdg_service.py" \
-  || fail "PWA project status must not display the migration bridge tag"
+  || fail "PWA project status must not display non-release tags"
 grep -q -- '--prune-tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must prune rewritten release tags"
 grep -q 'mb.returncode == 0' "$ROOT/deploy/bot/pdg-bot.py" \
