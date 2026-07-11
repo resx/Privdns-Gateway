@@ -367,8 +367,6 @@ migrate_fw_gms(){
   fi
 }
 
-# 老装迁移: 给内网管理端放行 9443/tcp。只追加端口,备份和 nft 校验失败均不动现网。
-# shellcheck disable=SC2120  # $1 仅测试注入
 migrate_rule_priority(){
   [[ -f /etc/sing-box/config.json && -f /opt/pdg-bot/pdg_service.py ]] || return 0
   local changed lock_path="/run/privdns-gateway.lock"
@@ -385,6 +383,8 @@ PY
   [[ "$changed" == "yes" ]] && c_g "已将用户手动分流规则调整到规则集之前。"
 }
 
+# 老装迁移: 给内网管理端放行 9443/tcp。只追加端口,备份和 nft 校验失败均不动现网。
+# shellcheck disable=SC2120  # $1 仅测试注入
 migrate_fw_admin(){
   local f="${1:-/etc/nftables.conf}" bak
   [[ -f "$f" ]] || return 0
