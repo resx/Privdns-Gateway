@@ -34,7 +34,7 @@ Noninteractive installs use `PDG_NONINTERACTIVE=1`, server/CIDR/domain values, a
 
 ## Release Versioning
 
-Project releases use SemVer tags. During an unfinished major release, keep the base version fixed and advance `-alpha.N`, `-beta.N`, then `-rc.N`; only tag `vMAJOR.MINOR.PATCH` after stability acceptance. Patch releases contain compatible fixes, minor releases add backward-compatible functionality, and major releases may break compatibility. Do not use version numbers to count features or same-day iterations.
+Project releases use SemVer tags. During an unfinished major release, keep the base version fixed and advance `-alpha.N`, `-beta.N`, then `-rc.N`; only tag `vMAJOR.MINOR.PATCH` after stability acceptance. Published tags are immutable: never force-move or reuse a tag, and increment the prerelease or patch number for every follow-up fix. Patch releases contain compatible fixes, minor releases add backward-compatible functionality, and major releases may break compatibility. Do not use version numbers to count features or same-day iterations.
 
 ## Architecture Overview
 
