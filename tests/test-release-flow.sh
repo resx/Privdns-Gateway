@@ -23,8 +23,8 @@ grep -q 'pdg_latest_release_tag' "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must exclude migration bridge tags from release selection"
 grep -q -- "refs/tags/\*:refs/tags/\*" "$ROOT/deploy/bot/pdg.sh" \
   || fail "pdg update must explicitly synchronize and prune rewritten release tags"
-grep -q 'fetch -q --unshallow --tags origin main' "$ROOT/deploy/bot/pdg.sh" \
-  || fail "pdg update must unshallow old installs before comparing tags"
+grep -q "fetch --unshallow origin main '+refs/tags/\*:refs/tags/\*'" "$ROOT/deploy/bot/pdg.sh" \
+  || fail "pdg update must force tag synchronization while unshallowing old installs"
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -55,6 +55,15 @@ REPO_DIR="$work/repo" bash -c "$fetcher; pdg_fetch_release_tags"
 selected=$(REPO_DIR="$work/repo" bash -c "$selector; pdg_latest_release_tag")
 [[ "$selected" == "v2.0.0-rc.1" ]] \
   || fail "migrated client must stay on rc.1, got $selected"
+
+# 旧安装通常是浅克隆；已移动的 RC tag 不能让第二阶段 unshallow 失败。
+git clone -q --depth 1 --branch main "file://$work/origin.git" "$work/shallow"
+git -C "$work/shallow" tag -f v2.0.0-rc.1 HEAD >/dev/null
+REPO_DIR="$work/shallow" bash -c "$fetcher; pdg_fetch_release_tags"
+[[ "$(git -C "$work/shallow" rev-parse --is-shallow-repository)" == "false" ]] \
+  || fail "legacy shallow install must be unshallowed"
+[[ "$(git -C "$work/shallow" rev-parse v2.0.0-rc.1^{commit})" == "$(git -C "$work/repo" rev-parse v2.0.0-rc.1^{commit})" ]] \
+  || fail "moved rc tag must be force-synchronized while unshallowing"
 
 grep -q '_fetch_release_tags' "$ROOT/deploy/bot/pdg-bot.py" \
   || fail "bot update check must fetch release tags through a helper"

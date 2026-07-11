@@ -732,7 +732,7 @@ def _fetch_release_tags():
         return False, (r.stderr or r.stdout or "git fetch 失败").strip()
     shallow = _git("rev-parse", "--is-shallow-repository")
     if shallow.stdout.strip() == "true":
-        r = _git("fetch", "-q", "--unshallow", "--tags", "origin", "main", t=180)
+        r = _git("fetch", "--unshallow", "origin", "main", "+refs/tags/*:refs/tags/*", t=180)
         if r.returncode != 0:
             return False, (r.stderr or r.stdout or "git fetch --unshallow 失败").strip()
     return True, ""

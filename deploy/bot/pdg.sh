@@ -26,9 +26,9 @@ _lock(){
 
 pdg_fetch_release_tags(){
   local dir="${1:-$REPO_DIR}"
-  git -C "$dir" fetch -q --prune --prune-tags origin main '+refs/tags/*:refs/tags/*' || return 1
+  git -C "$dir" fetch --prune --prune-tags origin main '+refs/tags/*:refs/tags/*' || return 1
   if [[ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-    git -C "$dir" fetch -q --unshallow --tags origin main || return 1
+    git -C "$dir" fetch --unshallow origin main '+refs/tags/*:refs/tags/*' || return 1
   fi
 }
 

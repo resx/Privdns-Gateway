@@ -22,9 +22,9 @@ die(){ echo -e "\033[1;31m[x]\033[0m $*" >&2; exit 1; }
 
 pdg_checkout_latest_tag(){
   local dir="$1" tag cur target
-  git -C "$dir" fetch -q --prune --prune-tags origin main '+refs/tags/*:refs/tags/*'
+  git -C "$dir" fetch --prune --prune-tags origin main '+refs/tags/*:refs/tags/*'
   if [[ "$(git -C "$dir" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]; then
-    git -C "$dir" fetch -q --unshallow --tags origin main
+    git -C "$dir" fetch --unshallow origin main '+refs/tags/*:refs/tags/*'
   fi
   # 只选择规范 SemVer 发布 tag；迁移桥接 tag 供旧客户端使用，但不作为新安装版本。
   tag=$(git -C "$dir" tag -l 'v*' \
