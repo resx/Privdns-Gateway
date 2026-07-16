@@ -94,7 +94,13 @@ ensure_ios_profile_access(){
   printf '%s\n' PDG_IOS_ALLOWED_CIDRS=172.22.0.0/16 > "$2/ios-profile.env"
 }
 migrate_fw_ios_profile(){ printf 'firewall %s\n' "$1" >> "$runtime_log"; }
-systemctl(){ printf 'systemctl %s\n' "$*" >> "$runtime_log"; }
+SYNC_RC=1
+systemctl(){
+  printf 'systemctl %s\n' "$*" >> "$runtime_log"
+  [[ "$*" == "start --wait pdg-ios-profile-sync.service" ]] && return "$SYNC_RC"
+  return 0
+}
+# 旧防火墙尚无动态集合时同步会失败，但辅助服务失败不能阻断管理端启动。
 ensure_ios_profile_runtime "$runtime_root"
 [[ -f "$runtime_root/opt/pdg-bot/profile-http.py" ]]
 [[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile.socket" ]]
@@ -103,7 +109,9 @@ ensure_ios_profile_runtime "$runtime_root"
 [[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile-cleanup.service" ]]
 [[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile-cleanup.timer" ]]
 grep -q '^systemctl daemon-reload$' "$runtime_log"
-grep -q '^systemctl enable --now pdg-ios-profile-sync.service pdg-ios-profile.socket pdg-ios-profile-cleanup.timer$' "$runtime_log"
+grep -q '^systemctl enable pdg-ios-profile-sync.service$' "$runtime_log"
+grep -q '^systemctl enable --now pdg-ios-profile.socket pdg-ios-profile-cleanup.timer$' "$runtime_log"
+grep -q '^systemctl start --wait pdg-ios-profile-sync.service$' "$runtime_log"
 rm -f "$REPO_DIR/deploy/ios/profile-http.py"
 ! ensure_ios_profile_runtime "$runtime_root"
 

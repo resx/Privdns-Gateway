@@ -52,7 +52,8 @@ grep -q 'pdg-admin.py' "$ROOT/install.sh" \
   && ok "安装脚本包含管理端、令牌和 unit" || bad "安装脚本缺管理端资产"
 grep -q 'NoNewPrivileges=true' "$ROOT/deploy/admin/pdg-admin.service" \
   && grep -q '/etc/privdns-gateway/admin.token' "$ROOT/deploy/admin/pdg-admin.service" \
-  && ok "systemd unit 使用受限令牌文件" || bad "systemd unit 安全项缺失"
+  && grep -q '^ExecStartPre=-/bin/sh' "$ROOT/deploy/admin/pdg-admin.service" \
+  && ok "systemd unit 使用受限令牌且辅助迁移不阻断启动" || bad "systemd unit 安全项或启动隔离缺失"
 grep -q 'admin \[--rotate\]' "$ROOT/deploy/bot/pdg.sh" \
   && grep -q '旧链接立即失效' "$ROOT/deploy/bot/pdg.sh" \
   && ok "CLI 支持管理令牌轮换" || bad "CLI 缺令牌轮换"

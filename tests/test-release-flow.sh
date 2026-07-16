@@ -41,6 +41,11 @@ git -C "$work/repo" tag v2.0.0
 selected=$(REPO_DIR="$work/repo" bash -c "$selector; pdg_latest_release_tag")
 [[ "$selected" == "v2.0.0" ]] \
   || fail "stable release must sort above prereleases, got $selected"
+git -C "$work/repo" tag v2.0.1-rc.1
+selected=$(REPO_DIR="$work/repo" bash -c "$selector; pdg_latest_release_tag")
+[[ "$selected" == "v2.0.1-rc.1" ]] \
+  || fail "patch prerelease must sort above the previous stable release, got $selected"
+git -C "$work/repo" tag -d v2.0.1-rc.1 >/dev/null
 
 # 模拟旧 v2.4.10 设备：远端已删除旧 tag，本地仍残留；同步后必须删掉旧 tag。
 git init -q --bare "$work/origin.git"

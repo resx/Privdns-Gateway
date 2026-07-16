@@ -15,7 +15,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # 抽出被测函数(避免 source 整个 pdg.sh 触发它底部的命令分发)
-eval "$(sed -n '/^_fw_is_stock(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
+eval "$(sed -n -e '/^_fw_is_stock(){/,/^}/p' -e '/^migrate_firewall_to_pdg(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
 
 # 生成一份"原装"防火墙: $1端口 $2内网段 $3端口集 $4是否有reject(1/0) $5排版(single|multi)
 gen_stock(){
@@ -41,6 +41,8 @@ gen_stock(){
 }
 
 pass=0; nfail=0
+ok(){ echo "[OK]   $1"; pass=$((pass+1)); }
+bad(){ echo "[FAIL] $1"; nfail=$((nfail+1)); }
 assert_stock(){  # f port cidr name
   if _fw_is_stock "$1" "$2" "$3"; then echo "[OK]   原装→迁移: $4"; pass=$((pass+1))
   else echo "[FAIL] 应判原装却被当自定义(老机器将永不迁移): $4"; nfail=$((nfail+1)); fi
@@ -102,6 +104,36 @@ assert_custom "$WORK/k" 22 172.22.0.0/16 "放行全部 TCP(无 dport)"
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853" 1 single > "$WORK/l"
 sed -i 's#\(ip protocol icmp accept\)#counter drop\n        \1#' "$WORK/l"
 assert_custom "$WORK/l" 22 172.22.0.0/16 "counter drop(无 dport)"
+
+# nft 失败必须原样保留配置并输出底层错误，便于生产升级直接定位。
+# shellcheck disable=SC2034  # 由上方动态抽取的 migrate_firewall_to_pdg 读取。
+REPO_DIR="$ROOT"
+c_g(){ :; }
+c_y(){ :; }
+sync_ios_panel_hosts(){ :; }
+cp "$WORK/a" "$WORK/check-fail"
+snap=$(cat "$WORK/check-fail")
+nft(){ echo "check syntax detail" >&2; return 1; }
+output=$(migrate_firewall_to_pdg "$WORK/check-fail" 2>&1)
+if [[ "$(cat "$WORK/check-fail")" == "$snap" && "$output" == *"check syntax detail"* ]]; then
+  ok "nft -c 失败 → 保留配置并输出错误"
+else
+  bad "nft -c 失败未保留配置或吞掉错误"
+fi
+
+cp "$WORK/a" "$WORK/apply-fail"
+snap=$(cat "$WORK/apply-fail")
+nft(){
+  if [[ "$1" == "-c" ]]; then return 0; fi
+  echo "apply netlink detail" >&2
+  return 1
+}
+output=$(migrate_firewall_to_pdg "$WORK/apply-fail" 2>&1)
+if [[ "$(cat "$WORK/apply-fail")" == "$snap" && "$output" == *"apply netlink detail"* ]]; then
+  ok "nft -f 失败 → 回滚配置并输出错误"
+else
+  bad "nft -f 失败未回滚配置或吞掉错误"
+fi
 
 echo "────────────────────────────────────────"
 echo "通过 $pass, 失败 $nfail"

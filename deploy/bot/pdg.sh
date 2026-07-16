@@ -133,8 +133,9 @@ _fw_is_stock(){
 # 不迁移则: 证书续期 pre-hook 进不了 inet pdg 开不了 80、doctor 读不到防火墙、且仍会 flush 掉别的表。
 # 安全做法: 解析旧配置里的 SSH 端口/内网段 → 渲染新模板 → nft -c 校验 → 备份 → nft -f → 删旧表。
 # 全程 SSH 不断(established + 新表放行 SSH; 加载新表时旧 inet filter 仍在 → 双重放行)。
+# shellcheck disable=SC2120  # 可选配置路径仅供回归测试注入，生产调用使用默认值。
 migrate_firewall_to_pdg(){
-  local f=/etc/nftables.conf
+  local f="${1:-/etc/nftables.conf}"
   [[ -f "$f" ]] || return 0
   # 已有动态 DNS/面板白名单集且无旧表 → 无需迁移。
   grep -q 'set pdg_dns_panel_hosts' "$f" && ! grep -q 'table inet filter' "$f" && return 0
@@ -159,8 +160,11 @@ migrate_firewall_to_pdg(){
   c_g "检测到旧版原装防火墙 → 启用 DNS/面板单 IP 白名单 (SSH=$port, 登记入口=$cidr)…"
   sed -e "s/__SSH_PORT__/$port/g" -e "s#__INTERNAL_CIDR__#$cidr#g" \
       "$REPO_DIR/deploy/firewall/nftables.conf" > "$tmp"
-  if ! nft -c -f "$tmp" >/dev/null 2>&1; then
-    c_y "  新规则 nft -c 校验未过, 保留旧防火墙不动。"; rm -f "$tmp"; return 0
+  local nft_error
+  if ! nft_error=$(nft -c -f "$tmp" 2>&1); then
+    c_y "  新规则 nft -c 校验未过, 保留旧防火墙不动。"
+    [[ -n "$nft_error" ]] && printf '%s\n' "$nft_error" >&2
+    rm -f "$tmp"; return 0
   fi
   # 必须先确认备份完整(cmp 逐字节相同)才敢覆盖现网配置; 磁盘满/cp 失败时中止, 不动现网。
   local bak; bak="$f.prepdg.$(date +%s)"
@@ -174,13 +178,15 @@ migrate_firewall_to_pdg(){
   rm -f "$tmp"
   # 关键: 只有"新表加载成功且 inet pdg 确实在内核里"才删旧表; 否则绝不删 inet filter。
   # nft -f 是原子的, 失败则内核不变(旧 inet filter 仍在生效), 只需把 on-disk 配置还原回旧的。
-  if nft -f "$f" 2>/dev/null && nft list table inet pdg >/dev/null 2>&1; then
+  local apply_error
+  if apply_error=$(nft -f "$f" 2>&1) && nft list table inet pdg >/dev/null 2>&1; then
     nft delete table inet filter 2>/dev/null || true   # 确认新表已载入, 再删旧表, 只留 inet pdg
     sync_ios_panel_hosts || true
     c_g "  ✅ 已启用 inet pdg 动态 IP 白名单。"
   else
     cp -a "$bak" "$f" 2>/dev/null                       # 还原 on-disk 配置=旧(内核里旧表仍在)
     c_y "  ⚠️ 新规则加载失败 → 保留旧防火墙、未删 inet filter、配置已还原(防火墙未中断)。"
+    [[ -n "$apply_error" ]] && printf '%s\n' "$apply_error" >&2
   fi
 }
 
@@ -548,7 +554,11 @@ ensure_ios_profile_runtime(){
     return 1
   fi
   systemctl daemon-reload || return 1
-  systemctl enable --now pdg-ios-profile-sync.service pdg-ios-profile.socket pdg-ios-profile-cleanup.timer >/dev/null 2>&1 || return 1
+  systemctl enable pdg-ios-profile-sync.service >/dev/null 2>&1 || return 1
+  systemctl enable --now pdg-ios-profile.socket pdg-ios-profile-cleanup.timer >/dev/null 2>&1 || return 1
+  if ! systemctl start --wait pdg-ios-profile-sync.service >/dev/null 2>&1; then
+    c_y "IP 白名单暂未同步；保留登记服务和管理端启动，待防火墙迁移成功后重试。"
+  fi
 }
 
 cmd_migrate_ios_profile(){
@@ -695,7 +705,15 @@ cmd_update(){
     c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
   fi
   systemctl daemon-reload
-  systemctl enable --now pdg-health.timer pdg-admin pdg-ios-profile-sync.service pdg-ios-profile.socket pdg-ios-profile-cleanup.timer >/dev/null 2>&1 || true
+  systemctl enable pdg-ios-profile-sync.service >/dev/null 2>&1 || true
+  if nft list set inet pdg pdg_dns_panel_hosts >/dev/null 2>&1; then
+    if ! sync_ios_panel_hosts; then
+      c_y "动态 IP 白名单同步失败，回滚到更新前快照…"; cmd_rollback 0; return 1
+    fi
+  else
+    c_y "动态 IP 白名单防火墙迁移未完成，暂沿用原来源限制；请根据上方 nft 错误修复后运行 sudo pdg migrate-fw。"
+  fi
+  systemctl enable --now pdg-health.timer pdg-admin pdg-ios-profile.socket pdg-ios-profile-cleanup.timer >/dev/null 2>&1 || true
   systemctl restart pdg-bot pdg-admin pdg-probe81 2>/dev/null || true
   systemctl restart pdg-ios-profile.socket 2>/dev/null || true
   sleep 2
