@@ -9,8 +9,8 @@ checks_src = (ROOT / "deploy/bot/checks.py").read_text(encoding="utf-8")
 assert '{"53", "80", "81", "443", "853", "8111", "5228", "5229", "5230", "8445", "9443"}' in checks_src, (
     "doctor firewall leak detection must include admin 9443, TG 8445 and GMS 5228-5230"
 )
-assert "53/80/81/443/853/8111/5228-5230/8445/9443" in checks_src, (
-    "doctor firewall OK text should mention admin, TG and GMS ports"
+assert "53/853/9443 仅限已登记 IP；其他数据入口仅限内网卡来源" in checks_src, (
+    "doctor firewall OK text should distinguish registered DNS/panel IPs from data CIDR"
 )
 
 # 动态: 端口区间写法(如 5228-5230)对全网开放也要被识别为泄露; 限内网来源则不报。

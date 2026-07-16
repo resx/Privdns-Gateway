@@ -1,16 +1,14 @@
 [Unit]
-Description=PrivDNS Gateway IP registration and iOS profile responder
+Description=PrivDNS Gateway sync registered client IPs to nftables
+After=network-online.target nftables.service
+Wants=network-online.target
 
 [Service]
-Type=simple
-ExecStart=/usr/bin/python3 /opt/pdg-bot/profile-http.py
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/pdg-bot/profile-http.py --sync
 Environment=WWW_DIR=/opt/pdg-bot/ios-www
 Environment=ACCESS_STATE_FILE=/opt/pdg-bot/ios-www/.ios-access.json
-Environment=PDG_IOS_SYNC_SERVICE=pdg-ios-profile-sync.service
 EnvironmentFile=-/etc/privdns-gateway/ios-profile.env
-StandardInput=socket
-StandardOutput=socket
-StandardError=journal
 User=root
 NoNewPrivileges=yes
 PrivateDevices=yes
@@ -20,6 +18,10 @@ ProtectHome=yes
 ProtectKernelTunables=yes
 ProtectSystem=strict
 ReadWritePaths=/opt/pdg-bot/ios-www
-RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictAddressFamilies=AF_NETLINK AF_UNIX
 RestrictSUIDSGID=yes
-CapabilityBoundingSet=
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

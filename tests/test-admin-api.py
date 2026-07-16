@@ -22,6 +22,10 @@ class FakeService:
         self.calls = []
 
     def overview(self): return {"default_exit": "jp"}
+    def ios_access_status(self): self.calls.append(("ios-status",)); return {"open": False, "hosts": []}
+    def open_ios_access(self, minutes): self.calls.append(("ios-open", minutes)); return {"open": True, "hosts": []}
+    def close_ios_access(self): self.calls.append(("ios-close",)); return {"open": False, "hosts": []}
+    def revoke_ios_host(self, host): self.calls.append(("ios-revoke", host)); return {"open": False, "hosts": []}
     def list_exits(self): return [{"tag": "jp"}]
     def preview_link(self, link, name=""): self.calls.append(("preview", link, name)); return {"tag": name or "new"}
     def add_exit(self, link, name=""): self.calls.append(("add", link, name)); return {"tag": name or "new"}
@@ -107,6 +111,19 @@ with tempfile.TemporaryDirectory() as directory:
         assert status == 200 and json.loads(payload)["data"]["default_exit"] == "jp"
         assert headers["Cache-Control"] == "no-store"
         assert headers["X-Frame-Options"] == "DENY"
+
+        status, _, _ = request(port, "GET", "/api/v1/allowlist", token)
+        assert status == 200 and service.calls[-1] == ("ios-status",)
+        status, _, _ = request(port, "POST", "/api/v1/allowlist/open", token, {"minutes": 10})
+        assert status == 200 and service.calls[-1] == ("ios-open", 10)
+        status, _, _ = request(port, "POST", "/api/v1/allowlist/close", token)
+        assert status == 200 and service.calls[-1] == ("ios-close",)
+        status, _, _ = request(port, "DELETE", "/api/v1/allowlist/hosts/172.22.1.9", token)
+        assert status == 200 and service.calls[-1] == ("ios-revoke", "172.22.1.9")
+        status, _, _ = request(port, "DELETE", "/api/v1/allowlist", token)
+        assert status == 200 and service.calls[-1] == ("ios-revoke", "all")
+        status, _, _ = request(port, "GET", "/api/v1/ios/access", token)
+        assert status == 200 and service.calls[-1] == ("ios-status",)
 
         status, _, payload = request(port, "POST", "/api/v1/exits/preview", token, {"link": "socks5://x", "name": "香港节点"})
         assert status == 200 and json.loads(payload)["data"]["tag"] == "香港节点"

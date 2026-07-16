@@ -15,6 +15,7 @@ import hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subproc
 import urllib.parse, urllib.request, urllib.error
 from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(__file__))
 from pdg_control import (  # noqa: E402
@@ -41,6 +42,7 @@ UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
 IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
 IOS_WWW_DIR = "/opt/pdg-bot/ios-www"
 IOS_PROFILE_PORT = 8111
+IOS_PROFILE_TTL = 600  # seconds, must match profile-http.py
 CERT = os.environ.get("PDG_CERT", "/etc/mosdns/certs/fullchain.pem")
 CERT_DIR = os.path.dirname(CERT)
 ADMIN_TOKEN_FILE = "/etc/privdns-gateway/admin.token"
@@ -219,6 +221,7 @@ def _nav(key):
         "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
             [{"text": "🖥 管理面板", "callback_data": "admin"}],
             [{"text": "📱 iOS 二维码/文件", "callback_data": "ios"}],
+            [{"text": "🔐 IP 白名单", "callback_data": "ios_access"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
@@ -1277,8 +1280,55 @@ def _update_ios_profile_allowlist(filename):
             os.unlink(temp_name)
 
 
-def _publish_ios_profile(data, custom=False):
+def _write_ios_metadata(filename, expires_at):
+    target = os.path.join(IOS_WWW_DIR, filename + ".meta")
+    fd, temp_name = tempfile.mkstemp(prefix=".ios-meta-", dir=IOS_WWW_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            json.dump({"expires_at": expires_at, "bound_ip": ""}, handle, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, target)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _cleanup_expired_ios_profiles(now=None):
+    now = time.time() if now is None else now
+    removed = set()
+    for meta_path in Path(IOS_WWW_DIR).glob("ios-*.mobileconfig.meta"):
+        filename = meta_path.name[:-5]
+        if not re.fullmatch(r"ios-[0-9a-f]{12}\.mobileconfig", filename):
+            continue
+        try:
+            metadata = json.loads(meta_path.read_text(encoding="ascii"))
+            expires_at = float(metadata.get("expires_at", 0))
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            expires_at = 0
+        if expires_at <= now:
+            try:
+                (Path(IOS_WWW_DIR) / filename).unlink(missing_ok=True)
+                meta_path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            removed.add(filename)
+    if removed:
+        allowlist = Path(IOS_WWW_DIR) / ".ios-profile-allowlist"
+        try:
+            names = [name for name in allowlist.read_text(encoding="ascii").splitlines()
+                     if name not in removed]
+            allowlist.write_text("".join(name + "\n" for name in names), encoding="ascii")
+        except OSError:
+            pass
+    return sorted(removed)
+
+
+def _publish_ios_profile(data, custom=False, ttl=IOS_PROFILE_TTL):
     os.makedirs(IOS_WWW_DIR, mode=0o755, exist_ok=True)
+    _cleanup_expired_ios_profiles()
     filename = "ios-dot.mobileconfig"
     if custom:
         filename = "ios-%s.mobileconfig" % uuid.uuid4().hex[:12]
@@ -1295,12 +1345,17 @@ def _publish_ios_profile(data, custom=False):
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+    if custom:
+        _write_ios_metadata(filename, time.time() + ttl)
     _update_ios_profile_allowlist(filename)
     return _ios_profile_url(filename)
 
 
-def _send_ios_assets(chat, profile, caption, custom=False):
-    url = _publish_ios_profile(profile, custom=custom)
+def _send_ios_assets(chat, profile, caption, custom=True, ttl=IOS_PROFILE_TTL):
+    url = _publish_ios_profile(profile, custom=custom, ttl=ttl)
+    if custom:
+        minutes = max(1, min(30, int(round(ttl / 60))))
+        _gateway.open_ios_access(minutes)
     qr_path = None
     try:
         fd, qr_path = tempfile.mkstemp(prefix="pdg-ios-qr-", suffix=".png")
@@ -1513,6 +1568,36 @@ def _limited_name_lines(names, limit=40):
     if len(names) > limit:
         lines.append(f"• … 另有 {len(names) - limit} 个")
     return "\n".join(lines)
+
+
+def _ip_allowlist_view():
+    status = _gateway.ios_access_status()
+    window = "开启" if status["open"] else "关闭"
+    if status["open"]:
+        window += f"（剩余 {status['remaining_seconds']} 秒）"
+    hosts = status["hosts"]
+    text = ("🔐 <b>IP 白名单</b>\n"
+            f"登记窗口: <b>{window}</b>\n"
+            "开启窗口后，在目标设备打开登记入口；成功后，该 IP 可访问 DoT 和管理面板。\n"
+            "白名单 IP: " + (", ".join(_esc(host) for host in hosts) if hosts else "无"))
+    rows = []
+    if status["open"]:
+        rows.append([{"text": "登记当前设备 IP", "url": f"http://{_ios_download_host()}:{IOS_PROFILE_PORT}/"}])
+    rows.extend([
+        [{"text": "开启 5 分钟", "callback_data": "iosopen:5"},
+         {"text": "开启 10 分钟", "callback_data": "iosopen:10"},
+         {"text": "开启 30 分钟", "callback_data": "iosopen:30"}],
+        [{"text": "关闭登记窗口", "callback_data": "iosclose"}],
+    ])
+    for host in hosts[:12]:
+        rows.append([{"text": "移除 " + host, "callback_data": "iosrevoke:" + host}])
+    if hosts:
+        rows.append([{"text": "🚫 移除全部 IP", "callback_data": "iosrevoke:ask"}])
+    rows.extend([
+        [{"text": "⬅️ 返回客户端", "callback_data": "nav:client"}],
+        [{"text": "🏠 主菜单", "callback_data": "menu"}],
+    ])
+    return text, {"inline_keyboard": rows}
 
 
 def _groups_desc(c):
@@ -1748,6 +1833,46 @@ def handle_cb(chat, mid, data):
                 [{"text": "🏠 主菜单", "callback_data": "menu"}]]
         edit(chat, mid, "🖥 <b>PrivDNS 管理面板</b>\n节点、测速、订阅覆写、分流、资源更新和连接管理均已集成。令牌只保存在链接片段中。",
              {"inline_keyboard": rows}); return
+    if data == "ios_access":
+        try:
+            text, keyboard = _ip_allowlist_view()
+            edit(chat, mid, text, keyboard)
+        except Exception as error:
+            edit(chat, mid, "读取 IP 白名单失败: " + _esc(str(error)), BACK)
+        return
+    if data.startswith("iosopen:"):
+        try:
+            minutes = int(data.split(":", 1)[1])
+            _gateway.open_ios_access(minutes)
+            text, keyboard = _ip_allowlist_view()
+            edit(chat, mid, "✅ 登记窗口已更新。\n\n" + text, keyboard)
+        except Exception as error:
+            edit(chat, mid, "开启 IP 登记窗口失败: " + _esc(str(error)), BACK)
+        return
+    if data == "iosclose":
+        try:
+            _gateway.close_ios_access()
+            text, keyboard = _ip_allowlist_view()
+            edit(chat, mid, "✅ 登记窗口已关闭。\n\n" + text, keyboard)
+        except Exception as error:
+            edit(chat, mid, "关闭 IP 登记窗口失败: " + _esc(str(error)), BACK)
+        return
+    if data == "iosrevoke:ask":
+        edit(chat, mid, "⚠️ 确认移除全部白名单 IP？移除后，这些设备需要重新通过 8111 登记入口加入。",
+             {"inline_keyboard": [
+                 [{"text": "🚫 确认移除全部", "callback_data": "iosrevoke:all"}],
+                 [{"text": "取消", "callback_data": "ios_access"}],
+             ]})
+        return
+    if data.startswith("iosrevoke:"):
+        host = data.split(":", 1)[1]
+        try:
+            _gateway.revoke_ios_host(host)
+            text, keyboard = _ip_allowlist_view()
+            edit(chat, mid, "✅ 已移除 " + ("全部白名单 IP" if host == "all" else _esc(host)) + "。\n\n" + text, keyboard)
+        except Exception as error:
+            edit(chat, mid, "移除白名单 IP 失败: " + _esc(str(error)), BACK)
+        return
     if data == "tgexit":
         c = load(); cur = _tg_exit(c)
         rows = [[{"text": ("✓ " if t == cur else "") + t, "callback_data": "tgx:" + t}] for t in exit_tags(c)]
@@ -1790,8 +1915,8 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "正在生成 iOS 二维码和描述文件…", BACK)
         try:
             caption = (f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
-                       "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。\n"
-                       "Wi-Fi/蜂窝均靠服务器 :81 探测激活, 安装时已自动配好。")
+                       "⚠️ 链接 <b>10 分钟</b>内有效，首次下载后仅该设备 IP 可继续访问。\n"
+                       "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。")
             url = _send_ios_assets(chat, _ios_profile(), caption)
             edit(chat, mid, "✅ iOS 二维码和描述文件已发送。\n下载地址: <code>%s</code>" % url, MENU)
         except Exception as e:  # noqa: BLE001
@@ -1982,10 +2107,49 @@ def handle_text(chat, text, message_id=None):
             send(chat, "管理面板仅在内网卡网络下可达。", {"inline_keyboard": [*rows, *_back_rows(BACK)]}); return
         if cmd == "/ios":
             try:
-                url = _send_ios_assets(chat, _ios_profile(), "📱 iOS 私密DNS 描述文件")
+                caption = ("📱 iOS/iPadOS 私密DNS 描述文件\n"
+                           "⚠️ 链接 <b>10 分钟</b>内有效，首次下载后仅该设备 IP 可继续访问。\n"
+                           "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。")
+                url = _send_ios_assets(chat, _ios_profile(), caption)
                 send_plain(chat, "✅ 二维码和描述文件已发送\n下载地址: <code>%s</code>" % url)
             except Exception as e:  # noqa: BLE001
                 send_plain(chat, f"生成失败: {e}")
+            return
+        if cmd in ("/ios-allow", "/ios_allow"):
+            parts = text.split()[1:]
+            try:
+                minutes = int(parts[0]) if parts else 10
+            except ValueError:
+                minutes = 10
+            minutes = max(1, min(30, minutes))
+            try:
+                caption = (f"📱 iOS 短暂放行 (有效期 {minutes} 分钟)\n"
+                           f"⚠️ 链接 <b>{minutes} 分钟</b>内有效，首次下载后仅该设备 IP 可继续访问。\n"
+                           "在目标 iOS 设备打开此地址 Safari 访问。")
+                url = _send_ios_assets(chat, _ios_profile(), caption, custom=True, ttl=minutes * 60)
+                send_plain(chat, "✅ 放行链接已生成(有效期 %d 分钟)\n下载地址: <code>%s</code>\n"
+                            "请在 iOS 设备的 Safari 中打开，下载后仅该设备可继续访问。" % (minutes, url))
+            except Exception as e:  # noqa: BLE001
+                send_plain(chat, f"生成失败: {e}")
+            return
+        if cmd in ("/allowlist", "/ios-access", "/ios_access"):
+            try:
+                status = _gateway.ios_access_status()
+                send_plain(chat, "🔐 IP 白名单\n"
+                            f"登记窗口: {'开启' if status['open'] else '关闭'}"
+                            + (f"（剩余 {status['remaining_seconds']} 秒）" if status['open'] else "")
+                            + "\n白名单 IP: " + (", ".join(status["hosts"]) or "无"))
+            except Exception as error:
+                send_plain(chat, f"读取失败: {error}")
+            return
+        if cmd in ("/allowlist-revoke", "/allowlist_revoke", "/ios-revoke", "/ios_revoke"):
+            host = text.split(maxsplit=1)[1].strip() if len(text.split(maxsplit=1)) > 1 else "all"
+            try:
+                status = _gateway.revoke_ios_host(host)
+                send_plain(chat, "✅ 已移除 " + ("全部白名单 IP" if host == "all" else host)
+                            + "；当前白名单 IP: " + (", ".join(status["hosts"]) or "无"))
+            except Exception as error:
+                send_plain(chat, f"移除失败: {error}")
             return
         if cmd == "/backup":
             send_document(chat, "pdg-backup-" + time.strftime("%Y%m%d-%H%M") + ".tar.gz", backup_blob(), "💾 配置备份"); return
@@ -2055,8 +2219,9 @@ def handle_text(chat, text, message_id=None):
         try:
             caption = (f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
                        + (("强制直连 Wi-Fi: " + _esc(", ".join(ssids)) + "\n") if ssids else "")
-                       + "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。")
-            url = _send_ios_assets(chat, _ios_profile(ssids), caption, custom=bool(ssids))
+                       + "⚠️ 链接 <b>10 分钟</b>内有效，首次下载后仅该设备 IP 可继续访问。\n"
+                       "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。")
+            url = _send_ios_assets(chat, _ios_profile(ssids), caption, custom=True)
             state.pop(chat, None)
             edit_console(chat, "✅ 二维码和描述文件已发送。\n下载地址: <code>%s</code>" % url,
                          CONSOLE_KB.get(chat) or MENU)
@@ -2122,6 +2287,20 @@ def main():
     post("deleteWebhook", {"drop_pending_updates": False})
     cmds = [
         {"command": "start", "description": "打开菜单 / 状态"},
+        {"command": "test", "description": "测速出口"},
+        {"command": "doctor", "description": "运行自检"},
+        {"command": "traffic", "description": "查看流量"},
+        {"command": "exits", "description": "查看出口"},
+        {"command": "rules", "description": "查看分流规则"},
+        {"command": "admin", "description": "打开管理面板"},
+        {"command": "ios", "description": "生成 iOS 描述文件"},
+        {"command": "ios_allow", "description": "开启 iOS 临时下载"},
+        {"command": "allowlist", "description": "查看 IP 白名单"},
+        {"command": "allowlist_revoke", "description": "移除白名单 IP"},
+        {"command": "backup", "description": "备份配置"},
+        {"command": "restore", "description": "恢复配置"},
+        {"command": "restart", "description": "重启服务"},
+        {"command": "update", "description": "更新规则库"},
         {"command": "cancel", "description": "取消当前输入"}]
     post("setMyCommands", {"commands": cmds})
     post("setMyCommands", {"commands": cmds, "scope": {"type": "all_private_chats"}})

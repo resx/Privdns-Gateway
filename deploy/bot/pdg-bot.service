@@ -8,6 +8,7 @@ Wants=network-online.target
 # 前缀 '-' = 文件缺失也不报错(此时 bot 读不到 token 会自行退出并提示)。
 EnvironmentFile=-/etc/privdns-gateway/bot.env
 Environment=PDG_CERT=__CERT_DIR__/fullchain.pem
+Environment=PDG_IOS_NFT_SYNC=1
 ExecStart=/usr/bin/python3 /opt/pdg-bot/bot.py
 Restart=on-failure
 RestartSec=3

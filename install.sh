@@ -109,10 +109,11 @@ rollback(){
     return
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-admin pdg-probe81 pdg-ios-profile.socket mosdns sing-box \
+  systemctl disable --now pdg-bot pdg-admin pdg-probe81 pdg-ios-profile.socket pdg-ios-profile-sync.service pdg-ios-profile-cleanup.timer mosdns sing-box \
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-admin,pdg-probe81,pdg-ios-profile,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
+  rm -f /etc/systemd/system/{pdg-bot,pdg-admin,pdg-probe81,pdg-ios-profile,pdg-ios-profile-cleanup,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
         /etc/systemd/system/pdg-ios-profile.socket /etc/systemd/system/pdg-ios-profile@.service \
+        /etc/systemd/system/pdg-ios-profile-sync.service /etc/systemd/system/pdg-ios-profile-cleanup.timer \
         /etc/systemd/system/pdg-rules-update.timer \
         /etc/systemd/system/pdg-health.timer \
         /etc/systemd/system/journald.conf.d/50-pdg.conf
@@ -242,6 +243,9 @@ install -m755 "$REPO_DIR"/deploy/ios/profile-http.py        /opt/pdg-bot/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
 install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile.socket /etc/systemd/system/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile@.service /etc/systemd/system/
+install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile-sync.service /etc/systemd/system/
+install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile-cleanup.service /etc/systemd/system/
+install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile-cleanup.timer /etc/systemd/system/
 install -d -m755 "$IOS_WWW_DIR"
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
@@ -395,8 +399,9 @@ PY
   cat > "$index_tmp" <<EOF
 <!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>PrivDNS Gateway iOS</title>
-<p><a href="/ios-dot.mobileconfig">下载 iOS DoT 描述文件</a></p>
+<title>PrivDNS Gateway IP 登记</title>
+<p>当前 IP 已加入 PrivDNS Gateway 白名单。</p>
+<p><a href="/ios-dot.mobileconfig">iOS/iPadOS：下载 DoT 描述文件</a></p>
 EOF
   install -m644 "$index_tmp" "$IOS_WWW_DIR/index.html"
   rm -f "$index_tmp"
@@ -422,6 +427,7 @@ rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
 systemctl enable --now mosdns sing-box pdg-admin pdg-probe81 pdg-ios-profile.socket >/dev/null 2>&1 || true
+systemctl enable --now pdg-ios-profile-cleanup.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true
 if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
@@ -435,6 +441,7 @@ printf 'nameserver 127.0.0.1\nnameserver 1.1.1.1\n' > /etc/resolv.conf
 c_g "应用防火墙…"
 systemctl enable nftables >/dev/null 2>&1 || true
 nft -f /etc/nftables.conf
+systemctl enable --now pdg-ios-profile-sync.service >/dev/null 2>&1 || true
 
 # ── 提交点前: 确认核心服务"持续"起来了 ──
 # systemd 默认 Type=simple, `systemctl start` 返 0 只代表 exec 成功, 进程可能随即崩溃。

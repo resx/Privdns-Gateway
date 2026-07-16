@@ -1,0 +1,14 @@
+[Unit]
+Description=PrivDNS Gateway expired iOS profile cleanup
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/pdg-bot/profile-http.py --cleanup
+User=root
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/pdg-bot/ios-www

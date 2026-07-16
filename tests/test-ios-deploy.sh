@@ -14,6 +14,9 @@ trap 'rm -rf "$work"' EXIT
 [[ -f "$root/deploy/ios/profile-http.py" ]]
 [[ -f "$root/deploy/ios/pdg-ios-profile.socket" ]]
 [[ -f "$root/deploy/ios/pdg-ios-profile@.service" ]]
+[[ -f "$root/deploy/ios/pdg-ios-profile-sync.service" ]]
+[[ -f "$root/deploy/ios/pdg-ios-profile-cleanup.service" ]]
+[[ -f "$root/deploy/ios/pdg-ios-profile-cleanup.timer" ]]
 grep -q 'IOS_PROFILE_PORT=8111' "$install"
 grep -q 'generate_ios_profile()' "$install"
 grep -q 'write_ios_profile_allowlist()' "$install"
@@ -21,20 +24,30 @@ grep -q '.ios-profile-allowlist' "$install"
 grep -q 'PDG_IOS_ALLOWED_CIDRS' "$install"
 grep -q 'qrencode -t ANSIUTF8' "$install"
 grep -q 'pdg-ios-profile.socket' "$install"
-grep -q 'tcp dport { 53, 80, 81, 443, 853, 8111,' "$firewall"
+grep -q 'set pdg_dns_panel_hosts' "$firewall"
+grep -q 'ip saddr @pdg_dns_panel_hosts tcp dport { 53, 853, 9443 } accept' "$firewall"
+grep -q 'ip saddr @pdg_dns_panel_hosts udp dport 53 accept' "$firewall"
+grep -q 'ip saddr __INTERNAL_CIDR__ tcp dport { 80, 81, 443, 8111,' "$firewall"
 grep -q 'migrate_fw_ios_profile()' "$pdg"
 grep -q 'ensure_ios_profile' "$pdg"
 grep -q 'write_ios_profile_allowlist()' "$pdg"
 grep -q 'ensure_ios_profile_access()' "$pdg"
 grep -q 'PDG_IOS_ALLOWED_CIDRS' "$pdg"
 grep -q '常驻 8111' "$pdg"
+grep -q 'GatewayService().open_ios_access(10)' "$pdg"
+grep -q 'pdg-ios-profile-sync.service' "$install"
+grep -q 'pdg-ios-profile-sync.service' "$pdg"
 grep -q 'pdg-ios-profile.socket' "$root/uninstall.sh"
 grep -q 'migrate-ios-profile' "$admin_service"
 grep -q 'migrate-ios-profile) cmd_migrate_ios_profile' "$pdg"
 grep -q 'install -m755 "$src/profile-http.py"' "$pdg"
 grep -q 'EnvironmentFile=-/etc/privdns-gateway/ios-profile.env' "$root/deploy/ios/pdg-ios-profile@.service"
-grep -q 'DynamicUser=yes' "$root/deploy/ios/pdg-ios-profile@.service"
+grep -q 'User=root' "$root/deploy/ios/pdg-ios-profile@.service"
+grep -q 'ReadWritePaths=/opt/pdg-bot/ios-www' "$root/deploy/ios/pdg-ios-profile@.service"
 grep -q 'ProtectSystem=strict' "$root/deploy/ios/pdg-ios-profile@.service"
+grep -q 'pdg-ios-profile-cleanup.timer' "$install"
+grep -q 'pdg-ios-profile-sync.service' "$root/uninstall.sh"
+grep -q 'pdg-ios-profile-cleanup.timer' "$root/uninstall.sh"
 
 eval "$(sed -n '/^ensure_ios_profile_access(){/,/^}/p' "$pdg")"
 c_y(){ :; }
@@ -57,7 +70,7 @@ REPO_DIR="$work/repo"
 runtime_root="$work/runtime"
 runtime_log="$work/runtime.log"
 mkdir -p "$REPO_DIR/deploy/ios"
-for name in profile-http.py pdg-ios-profile.socket pdg-ios-profile@.service pdg-dot-ondemand.mobileconfig.tmpl; do
+for name in profile-http.py pdg-ios-profile.socket pdg-ios-profile@.service pdg-ios-profile-sync.service pdg-ios-profile-cleanup.service pdg-ios-profile-cleanup.timer pdg-dot-ondemand.mobileconfig.tmpl; do
   printf '%s\n' "$name" > "$REPO_DIR/deploy/ios/$name"
 done
 install(){
@@ -86,8 +99,11 @@ ensure_ios_profile_runtime "$runtime_root"
 [[ -f "$runtime_root/opt/pdg-bot/profile-http.py" ]]
 [[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile.socket" ]]
 [[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile@.service" ]]
+[[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile-sync.service" ]]
+[[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile-cleanup.service" ]]
+[[ -f "$runtime_root/etc/systemd/system/pdg-ios-profile-cleanup.timer" ]]
 grep -q '^systemctl daemon-reload$' "$runtime_log"
-grep -q '^systemctl enable --now pdg-ios-profile.socket$' "$runtime_log"
+grep -q '^systemctl enable --now pdg-ios-profile-sync.service pdg-ios-profile.socket pdg-ios-profile-cleanup.timer$' "$runtime_log"
 rm -f "$REPO_DIR/deploy/ios/profile-http.py"
 ! ensure_ios_profile_runtime "$runtime_root"
 

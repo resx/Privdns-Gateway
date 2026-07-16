@@ -63,6 +63,11 @@ assert_stock "$WORK/m" 22 172.22.0.0/16 "最早期: udp {53,443} 放行(QUIC 未
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443" 0 multi > "$WORK/n"
 sed -i -e 's#tcp dport { 22 } accept#tcp dport { 22, 853 } accept#' -e 's#udp dport { 53 }#udp dport { 53, 443 }#' "$WORK/n"
 assert_stock "$WORK/n" 22 172.22.0.0/16 "最初版: 853 曾对全网开放(tcp {22,853})"
+# 动态白名单上线前的发布版已经使用 inet pdg + declare/delete/recreate，必须自动升级。
+gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853, 8111, 5228-5230, 8445, 9443" 1 single > "$WORK/o"
+sed -i -e 's/^flush ruleset$/table inet pdg\ndelete table inet pdg/' \
+  -e 's/^table inet filter {/table inet pdg {/' "$WORK/o"
+assert_stock "$WORK/o" 22 172.22.0.0/16 "旧 inet pdg declare/delete/recreate → 动态白名单迁移"
 
 # ── 自定义(都应判"非原装", 必须跳过)──
 gen_stock 22 172.22.0.0/16 "53, 80, 81, 443, 853, 8445" 1 single > "$WORK/e"

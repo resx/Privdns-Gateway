@@ -8,7 +8,7 @@
 
 1. Phones send DoT queries to mosdns on port 853. It checks the carrier CIDR, resolves direct domains through configured upstreams, and rewrites proxy-domain A records to the gateway while suppressing AAAA/HTTPS responses.
 2. Rewritten traffic reaches sing-box on ports 80/443. SNI or Host selects a direct or node outbound; GMS ports 5228–5230 use `gms-mtalk`. nftables restricts these entries to the internal CIDR.
-3. Telegram and the PWA manage subscriptions, exits, and routing through shared services; sing-box writes follow lock → validate → atomic replace → restart → rollback. `pdg` handles lifecycle. HTTPS 9443 and socket-activated iOS profile downloads on 8111 are CIDR-restricted; iOS downloads also require an exact published-file allowlist.
+3. Telegram and the PWA manage subscriptions, exits, and routing through shared services; sing-box writes follow lock → validate → atomic replace → restart → rollback. `pdg` handles lifecycle. DNS ports 53/853 and HTTPS 9443 are restricted by the dynamic `pdg_dns_panel_hosts` nft set populated from registered IPs; CIDR access remains only for the 8111 iOS first-registration path and other data ports. iOS downloads also require an exact published-file allowlist. Bot-generated links expire after 10 minutes by default, bind on first allowed-CIDR download to the client IP, and are removed by the cleanup timer; the default profile requires the same one-time access window, then remains available only to registered IPs.
 
 ## Build and Development Commands
 

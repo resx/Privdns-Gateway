@@ -56,10 +56,11 @@ def _dot_file():
         return ""
 
 def check_services():
-    bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-admin", "pdg-probe81", "pdg-ios-profile.socket")
+    bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-admin", "pdg-probe81",
+                       "pdg-ios-profile.socket", "pdg-ios-profile-cleanup.timer")
            if _run(["systemctl", "is-active", s])[1].strip() != "active"]
     return ("fail", "服务", "未运行: " + ", ".join(bad)) if bad \
-        else ("ok", "服务", "mosdns/sing-box/pdg-bot/pdg-admin/pdg-probe81/pdg-ios-profile 都在")
+        else ("ok", "服务", "mosdns/sing-box/pdg-bot/pdg-admin/pdg-probe81/pdg-ios-profile/cleanup 都在")
 
 def check_singbox_version():
     _, out, _ = _run(["sing-box", "version"])
@@ -155,7 +156,7 @@ def check_nft():
                     leaked |= {p for p in sens if a <= int(p) <= b}
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
-    return ("ok", "防火墙", "53/80/81/443/853/8111/5228-5230/8445/9443 仅限内网卡来源")
+    return ("ok", "防火墙", "53/853/9443 仅限已登记 IP；其他数据入口仅限内网卡来源")
 
 def check_gms():
     """GMS/FCM 推送端口(5228-5230)是否完整且路由正确。只读、不触发迁移: 老装第一次 pdg update

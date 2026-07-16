@@ -10,6 +10,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -17,8 +18,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import unicodedata
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Windows test environment
+    fcntl = None
 
 from pdg_control import (
     SingBoxControl,
@@ -41,6 +48,9 @@ TEST_TARGETS = {
     "apple": "https://www.apple.com/library/test/success.html",
 }
 OVERRIDE_PROPERTIES = {"tcp_fast_open", "udp_fragment"}
+IOS_ACCESS_TTL = 600
+IOS_ACCESS_STATE = "/opt/pdg-bot/ios-www/.ios-access.json"
+IOS_NFT_SET = "pdg_dns_panel_hosts"
 
 
 class ServiceError(Exception):
@@ -59,6 +69,7 @@ class GatewayService:
         ruleset_dir: str = "/etc/sing-box/rs",
         subscription_meta_path: str = "/opt/pdg-bot/subscriptions.json",
         rule_order_marker_path: str = "/etc/privdns-gateway/rule-order.custom",
+        ios_access_path: str = IOS_ACCESS_STATE,
     ) -> None:
         self.control = control or SingBoxControl()
         self.direct_path = direct_path
@@ -67,6 +78,7 @@ class GatewayService:
         self.ruleset_dir = ruleset_dir
         self.subscription_meta_path = subscription_meta_path
         self.rule_order_marker_path = rule_order_marker_path
+        self.ios_access_path = ios_access_path
         self._metadata_lock = threading.RLock()
 
     def _run(self, command):
@@ -105,6 +117,127 @@ class GatewayService:
             "group_count": groups,
             "rule_count": rules,
         }
+
+    @contextmanager
+    def _locked_ios_access(self):
+        path = Path(self.ios_access_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._metadata_lock, open(str(path) + ".lock", "a+", encoding="ascii") as lock:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _load_ios_access(self) -> dict:
+        try:
+            value = json.loads(Path(self.ios_access_path).read_text(encoding="ascii"))
+        except (OSError, json.JSONDecodeError):
+            value = {}
+        hosts = []
+        for raw in value.get("hosts", []) if isinstance(value, dict) else []:
+            try:
+                hosts.append(str(ipaddress.ip_address(raw)))
+            except ValueError:
+                continue
+        try:
+            open_until = max(0.0, float(value.get("open_until", 0))) if isinstance(value, dict) else 0.0
+        except (TypeError, ValueError):
+            open_until = 0.0
+        return {"open_until": open_until, "hosts": sorted(set(hosts))}
+
+    def _save_ios_access(self, value: dict) -> None:
+        path = Path(self.ios_access_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=".ios-access-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="ascii") as handle:
+                json.dump(value, handle, separators=(",", ":"))
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temp_name, 0o600)
+            os.replace(temp_name, path)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+    @staticmethod
+    def _ios_access_result(state: dict, now: float) -> dict:
+        return {
+            "open": state["open_until"] > now,
+            "open_until": state["open_until"],
+            "remaining_seconds": max(0, int(state["open_until"] - now)),
+            "hosts": state["hosts"],
+        }
+
+    def ios_access_status(self) -> dict:
+        with self._locked_ios_access():
+            state = self._load_ios_access()
+            now = time.time()
+            if state["open_until"] <= now and state["open_until"] != 0:
+                state["open_until"] = 0
+                self._save_ios_access(state)
+            return self._ios_access_result(state, now)
+
+    def open_ios_access(self, minutes: int = 10) -> dict:
+        try:
+            minutes = int(minutes)
+        except (TypeError, ValueError) as error:
+            raise ServiceError("放行时长必须是整数") from error
+        if not 1 <= minutes <= 30:
+            raise ServiceError("放行时长必须在 1-30 分钟之间")
+        with self._locked_ios_access():
+            state = self._load_ios_access()
+            now = time.time()
+            state["open_until"] = now + minutes * 60
+            self._save_ios_access(state)
+            return self._ios_access_result(state, now)
+
+    def close_ios_access(self) -> dict:
+        with self._locked_ios_access():
+            state = self._load_ios_access()
+            state["open_until"] = 0
+            self._save_ios_access(state)
+            return self._ios_access_result(state, time.time())
+
+    def _sync_ios_firewall(self, state: dict) -> None:
+        if os.environ.get("PDG_IOS_NFT_SYNC") != "1":
+            return
+        hosts = [host for host in state["hosts"] if ipaddress.ip_address(host).version == 4]
+        rules = [f"flush set inet pdg {IOS_NFT_SET}"]
+        if hosts:
+            rules.append(f"add element inet pdg {IOS_NFT_SET} {{ {', '.join(hosts)} }}")
+        try:
+            result = subprocess.run(
+                ["nft", "-f", "-"], input="\n".join(rules) + "\n",
+                text=True, capture_output=True, timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise ServiceError("DNS/管理面板白名单同步失败", 503) from error
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "nft 执行失败").strip()
+            raise ServiceError("DNS/管理面板白名单同步失败: " + message[:200], 503)
+
+    def revoke_ios_host(self, host: str) -> dict:
+        if host.lower() == "all":
+            with self._locked_ios_access():
+                state = {"open_until": 0, "hosts": []}
+                self._sync_ios_firewall(state)
+                self._save_ios_access(state)
+                return self._ios_access_result(state, time.time())
+        try:
+            normalized = str(ipaddress.ip_address(host))
+        except ValueError as error:
+            raise ServiceError("IP 地址无效") from error
+        with self._locked_ios_access():
+            state = self._load_ios_access()
+            state["hosts"] = [item for item in state["hosts"] if item != normalized]
+            self._sync_ios_firewall(state)
+            self._save_ios_access(state)
+            return self._ios_access_result(state, time.time())
 
     def list_exits(self) -> list[dict]:
         config = self.control.load()

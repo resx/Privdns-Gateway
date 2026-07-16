@@ -5,10 +5,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
-eval "$(sed -n '/^migrate_fw_admin(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
+eval "$(sed -n -e '/^sync_ios_panel_hosts(){/,/^}/p' -e '/^migrate_fw_admin(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
 c_g(){ :; }; c_y(){ :; }
 NFT_RC=0
 nft(){ return "$NFT_RC"; }
+systemctl(){ printf '%s\n' "$*" >> "$WORK/systemctl.log"; return 0; }
 
 pass=0; fail=0
 ok(){ echo "[OK]   $1"; pass=$((pass+1)); }
@@ -23,6 +24,8 @@ table inet pdg {
 EOF
 migrate_fw_admin "$WORK/fw"
 grep -q '8445, 9443 } accept' "$WORK/fw" && ok "老装内网端口集追加 9443" || bad "未追加 9443"
+grep -q '^start --wait pdg-ios-profile-sync.service$' "$WORK/systemctl.log" \
+  && ok "防火墙重载后同步动态 IP 白名单" || bad "防火墙重载后未同步动态 IP 白名单"
 snap="$(cat "$WORK/fw")"
 migrate_fw_admin "$WORK/fw"
 [[ "$(cat "$WORK/fw")" == "$snap" ]] && ok "9443 迁移幂等" || bad "二次迁移改动配置"
@@ -39,9 +42,10 @@ snap="$(cat "$WORK/fail")"
 NFT_RC=1; migrate_fw_admin "$WORK/fail"; NFT_RC=0
 [[ "$(cat "$WORK/fail")" == "$snap" ]] && ok "nft 校验失败回滚" || bad "nft 失败未回滚"
 
-grep -q '9443' "$ROOT/deploy/firewall/nftables.conf" \
-  && grep -q 'ip saddr __INTERNAL_CIDR__' "$ROOT/deploy/firewall/nftables.conf" \
-  && ok "模板仅内网放行 9443" || bad "防火墙模板缺 9443 内网规则"
+grep -q 'set pdg_dns_panel_hosts' "$ROOT/deploy/firewall/nftables.conf" \
+  && grep -q 'ip saddr @pdg_dns_panel_hosts tcp dport { 53, 853, 9443 } accept' "$ROOT/deploy/firewall/nftables.conf" \
+  && ! grep -q 'ip saddr __INTERNAL_CIDR__.*9443' "$ROOT/deploy/firewall/nftables.conf" \
+  && ok "模板仅登记 IP 放行 DNS/9443" || bad "防火墙模板未启用登记 IP 白名单"
 grep -q 'pdg-admin.py' "$ROOT/install.sh" \
   && grep -q 'admin.token' "$ROOT/install.sh" \
   && grep -q 'pdg-admin.service' "$ROOT/install.sh" \

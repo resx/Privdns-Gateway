@@ -4,9 +4,11 @@ set -uo pipefail
 [[ $EUID -eq 0 ]] || { echo "请用 root 运行"; exit 1; }
 
 systemctl disable --now pdg-bot pdg-admin pdg-probe81 mosdns sing-box pdg-rules-update.timer pdg-health.timer 2>/dev/null || true
-systemctl disable --now pdg-ios-profile.socket 2>/dev/null || true
+systemctl disable --now pdg-ios-profile.socket pdg-ios-profile-sync.service pdg-ios-profile-cleanup.timer 2>/dev/null || true
 rm -f /etc/systemd/system/{pdg-bot,pdg-admin,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
       /etc/systemd/system/pdg-ios-profile.socket /etc/systemd/system/pdg-ios-profile@.service \
+      /etc/systemd/system/pdg-ios-profile-sync.service \
+      /etc/systemd/system/pdg-ios-profile-cleanup.service /etc/systemd/system/pdg-ios-profile-cleanup.timer \
       /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
       /etc/systemd/system/journald.conf.d/50-pdg.conf
 systemctl daemon-reload

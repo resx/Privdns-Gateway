@@ -89,6 +89,14 @@ class AdminHandler(BaseHTTPRequestHandler):
     def _api(self, method: str, path: str):
         if method == "GET" and path == "/api/v1/overview":
             return self.service.overview()
+        if method == "GET" and path in {"/api/v1/allowlist", "/api/v1/ios/access"}:
+            return self.service.ios_access_status()
+        if method == "POST" and path in {"/api/v1/allowlist/open", "/api/v1/ios/access/open"}:
+            return self.service.open_ios_access(self._body().get("minutes", 10))
+        if method == "POST" and path in {"/api/v1/allowlist/close", "/api/v1/ios/access/close"}:
+            return self.service.close_ios_access()
+        if method == "DELETE" and path in {"/api/v1/allowlist", "/api/v1/ios/access"}:
+            return self.service.revoke_ios_host("all")
         if method == "GET" and path == "/api/v1/exits":
             return self.service.list_exits()
         if method == "POST" and path == "/api/v1/exits/preview":
@@ -167,6 +175,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/v1/resources/project/update":
             self._body()
             return self.service.start_project_update()
+
+        allowlist_host_prefixes = ("/api/v1/allowlist/hosts/", "/api/v1/ios/access/hosts/")
+        if method == "DELETE":
+            for prefix in allowlist_host_prefixes:
+                if path.startswith(prefix):
+                    host = urllib.parse.unquote(path[len(prefix):])
+                    return self.service.revoke_ios_host(host)
 
         exit_prefix = "/api/v1/exits/"
         if path.startswith(exit_prefix):

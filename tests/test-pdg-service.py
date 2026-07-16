@@ -2,6 +2,7 @@
 """管理业务服务的出口与分流 CRUD 回归。"""
 import base64
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "deploy" / "bot"))
 
+import pdg_service  # noqa: E402
 from pdg_control import SingBoxControl  # noqa: E402
 from pdg_links import normalize_tag  # noqa: E402
 from pdg_service import GatewayService, ServiceError  # noqa: E402
@@ -60,14 +62,74 @@ with tempfile.TemporaryDirectory() as directory:
     runner = Runner()
     control = SingBoxControl(str(config_path), str(root / "pdg.lock"), runner=runner, sleeper=lambda _: None)
     rule_order_marker = root / "rule-order.custom"
+    ios_access_path = root / "ios-access.json"
     service = GatewayService(
         control, str(direct_path), str(meta_path), ruleset_dir=str(root / "rs"),
         subscription_meta_path=str(subscription_path), rule_order_marker_path=str(rule_order_marker),
+        ios_access_path=str(ios_access_path),
     )
 
     overview = service.overview()
     assert overview["default_exit"] == "hk" and overview["proxy_count"] == 1
     assert all(value == "active" for value in overview["services"].values())
+
+    access = service.open_ios_access(2)
+    assert access["open"] and 110 <= access["remaining_seconds"] <= 120
+    assert service.close_ios_access()["open"] is False
+    ios_access_path.write_text(
+        json.dumps({"open_until": 0, "hosts": ["172.22.1.9", "bad"]}), encoding="ascii"
+    )
+    assert service.ios_access_status()["hosts"] == ["172.22.1.9"]
+    nft_calls = []
+    real_subprocess_run = pdg_service.subprocess.run
+    old_nft_sync = os.environ.get("PDG_IOS_NFT_SYNC")
+
+    def fake_nft(command, **kwargs):
+        nft_calls.append((command, kwargs.get("input", "")))
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    os.environ["PDG_IOS_NFT_SYNC"] = "1"
+    pdg_service.subprocess.run = fake_nft
+    try:
+        assert service.revoke_ios_host("172.22.1.9")["hosts"] == []
+    finally:
+        pdg_service.subprocess.run = real_subprocess_run
+        if old_nft_sync is None:
+            os.environ.pop("PDG_IOS_NFT_SYNC", None)
+        else:
+            os.environ["PDG_IOS_NFT_SYNC"] = old_nft_sync
+    assert nft_calls[0][0] == ["nft", "-f", "-"]
+    assert "flush set inet pdg pdg_dns_panel_hosts" in nft_calls[0][1]
+    assert "172.22.1.9" not in nft_calls[0][1]
+
+    ios_access_path.write_text(
+        json.dumps({"open_until": 0, "hosts": ["172.22.1.9"]}), encoding="ascii"
+    )
+    old_nft_sync = os.environ.get("PDG_IOS_NFT_SYNC")
+    os.environ["PDG_IOS_NFT_SYNC"] = "1"
+    pdg_service.subprocess.run = lambda command, **kwargs: subprocess.CompletedProcess(
+        command, 1, "", "set missing"
+    )
+    try:
+        service.revoke_ios_host("172.22.1.9")
+    except ServiceError as error:
+        assert error.status == 503 and "白名单同步失败" in str(error)
+    else:
+        raise AssertionError("nft failure should abort host revocation")
+    finally:
+        pdg_service.subprocess.run = real_subprocess_run
+        if old_nft_sync is None:
+            os.environ.pop("PDG_IOS_NFT_SYNC", None)
+        else:
+            os.environ["PDG_IOS_NFT_SYNC"] = old_nft_sync
+    assert service.ios_access_status()["hosts"] == ["172.22.1.9"]
+
+    try:
+        service.open_ios_access(31)
+    except ServiceError as error:
+        assert "1-30" in str(error)
+    else:
+        raise AssertionError("IP allowlist window should reject >30 minutes")
 
     exits = service.list_exits()
     assert "gms-mtalk" not in [item["tag"] for item in exits]

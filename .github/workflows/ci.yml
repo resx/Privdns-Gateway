@@ -23,7 +23,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
 
       - name: Python 语法 (py_compile)
-        run: python3 -m py_compile deploy/bot/*.py deploy/admin/*.py tests/*.py
+        run: python3 -m py_compile deploy/bot/*.py deploy/admin/*.py deploy/ios/*.py tests/*.py
 
       - name: Shell 语法 (bash -n)
         run: |
@@ -75,6 +75,8 @@ jobs:
               deploy/bot/pdg-rules-update.service deploy/bot/pdg-health.timer \
               deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service \
               deploy/ios/pdg-ios-profile.socket deploy/ios/pdg-ios-profile@.service \
+              deploy/ios/pdg-ios-profile-sync.service deploy/ios/pdg-ios-profile-cleanup.service \
+              deploy/ios/pdg-ios-profile-cleanup.timer \
               deploy/admin/pdg-admin.service || true
             echo "(CI 环境缺二进制/路径, 上面的告警多为预期; 重点看指令拼写/语法错)"
           else

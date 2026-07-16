@@ -51,7 +51,7 @@ sudo ./install.sh
 
 > 从原项目 `v1.1.16` 或其他旧版本迁移时，请先阅读 [原项目迁移指南](MIGRATION-FROM-ORIGINAL.md)。已有安装不要直接运行普通 `install.sh` 覆盖。
 
-管理面板监听 `https://<DoT域名>:9443/`,仅允许 `PDG_INTERNAL_CIDR` 来源,API 还使用 `/etc/privdns-gateway/admin.token` 的 Bearer 令牌。推荐从 bot「📱 客户端 → 🖥 管理面板」进入,或运行 `sudo pdg admin` 显示带令牌链接。该链接等同管理员凭据,不要分享或截图。
+管理面板监听 `https://<DoT域名>:9443/`,仅允许 IP 白名单中的来源；`PDG_INTERNAL_CIDR` 只用于 8111 首次登记。API 还使用 `/etc/privdns-gateway/admin.token` 的 Bearer 令牌。推荐先在 bot「📱 客户端 → IP 白名单」中登记当前设备；iOS 也可运行 `sudo pdg ios` 或从 bot 生成描述文件完成登记。随后从 bot「📱 客户端 → 🖥 管理面板」进入,或运行 `sudo pdg admin` 显示带令牌链接。该链接等同管理员凭据,不要分享或截图。
 
 默认路由是「**国内直连 / 其余国际从 VPS 直出**」。要把国际流量走你的落地节点,在 bot 里加出口再把 `final` 或具体规则指过去。
 
@@ -99,15 +99,15 @@ sudo PDG_NONINTERACTIVE=1 \
 | 端口 | 协议 | 开放范围 | 用途 |
 |---|---|---|---|
 | 22 | tcp | 全网 | SSH 管理 |
-| 853 | tcp | 仅内网卡段 | **DoT — 手机私密 DNS 入口(核心)** |
+| 853 | tcp | 仅已登记白名单 IP | **DoT — 手机私密 DNS 入口(核心)** |
 | 443 | tcp+udp | 仅内网卡段 | **sing-box 数据入口(嗅 SNI / QUIC)** |
 | 80 | tcp | 仅内网卡段 | sing-box HTTP 入口(嗅 Host) |
-| 53 | tcp+udp | 仅内网卡段 | 明文 DNS |
+| 53 | tcp+udp | 仅已登记白名单 IP | 明文 DNS |
 | 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点 |
 | 5228-5230 | tcp | 仅内网卡段 | GMS/FCM 推送(mtalk.google.com 原生端口,经 sing-box 专用入口路由) |
 | 9090 | tcp | 仅 127.0.0.1 | sing-box clash_api(bot/API 用,不对外) |
-| 8111 | tcp | 仅内网卡段 | iOS 描述文件常驻下载端点 |
-| 9443 | tcp | 仅内网卡段 | HTTPS PWA 管理端(另有 Bearer 令牌认证) |
+| 8111 | tcp | `PDG_INTERNAL_CIDR` 首次登记 | iOS 描述文件常驻下载端点 |
+| 9443 | tcp | 仅已登记白名单 IP | HTTPS PWA 管理端(另有 Bearer 令牌认证) |
 
 ⚠️ **证书签发/续期需要从公网访问 80 端口**(Let's Encrypt HTTP-01 校验):签发时 pre-hook 会把 80 临时对全网开放(并停 sing-box),完后还原。
 所以**云安全组必须允许入站 80**,否则证书续期会失败。

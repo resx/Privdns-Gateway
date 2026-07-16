@@ -1,5 +1,5 @@
 [Unit]
-Description=PrivDNS Gateway iOS profile HTTP socket
+Description=PrivDNS Gateway IP registration and iOS profile HTTP socket
 
 [Socket]
 ListenStream=0.0.0.0:8111

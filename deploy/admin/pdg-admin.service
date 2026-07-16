@@ -4,7 +4,8 @@ After=network-online.target mosdns.service sing-box.service
 Wants=network-online.target
 
 [Service]
-ExecStartPre=/bin/sh -c 'test -x /opt/pdg-bot/profile-http.py && test -f /etc/systemd/system/pdg-ios-profile.socket && test -f /etc/systemd/system/pdg-ios-profile@.service && test -s /etc/privdns-gateway/ios-profile.env && test -s /opt/pdg-bot/ios-www/ios-dot.mobileconfig && test -s /opt/pdg-bot/ios-www/.ios-profile-allowlist || exec /usr/local/bin/pdg migrate-ios-profile'
+ExecStartPre=/bin/sh -c 'test -x /opt/pdg-bot/profile-http.py && test -f /etc/systemd/system/pdg-ios-profile.socket && test -f /etc/systemd/system/pdg-ios-profile@.service && test -f /etc/systemd/system/pdg-ios-profile-sync.service && test -f /etc/systemd/system/pdg-ios-profile-cleanup.service && test -f /etc/systemd/system/pdg-ios-profile-cleanup.timer && test -s /etc/privdns-gateway/ios-profile.env && test -s /opt/pdg-bot/ios-www/ios-dot.mobileconfig && test -s /opt/pdg-bot/ios-www/.ios-profile-allowlist || exec /usr/local/bin/pdg migrate-ios-profile'
+Environment=PDG_IOS_NFT_SYNC=1
 ExecStart=/usr/bin/python3 /opt/pdg-admin/pdg-admin.py --port 9443 --token-file /etc/privdns-gateway/admin.token --web-root /opt/pdg-admin/web --cert /etc/mosdns/certs/fullchain.pem --key /etc/mosdns/certs/privkey.pem
 Restart=on-failure
 RestartSec=3

@@ -10,7 +10,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 
 # 抽出被测函数; 外部命令与输出函数打桩
-eval "$(sed -n '/^migrate_fw_gms(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
+eval "$(sed -n -e '/^sync_ios_panel_hosts(){/,/^}/p' -e '/^migrate_fw_gms(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
 eval "$(sed -n '/^migrate_singbox_gms(){/,/^}/p' "$ROOT/deploy/bot/pdg.sh")"
 c_g(){ :; }; c_y(){ :; }
 NFT_RC=0; SB_RC=0; SVC_STATE=active
