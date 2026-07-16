@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """PrivDNS Gateway — Telegram 管理 bot v3 (纯标准库, long-poll)。
 
-出口  : 列表 / 添加(ss/vmess/trojan/vless 链接) / 删除 / 改名(级联更新引用) / 设默认出口 / 故障切换组(urltest)
+出口  : 列表 / 添加节点分享链接 / 删除 / 改名(级联更新引用) / 设默认出口 / 故障切换组(urltest)
 分流  : 规则列表 / 添加(域名→出口|direct) / 删除 / 添加规则集(Surge .list URL→出口) / 删除规则集
 诊断  : 状态 / 端到端测出口延迟(clash_api) / 流量统计(clash_api)
 运维  : 重启 / 更新规则库(geosite + 规则集) / iOS 描述文件下发 / 配置备份·恢复
@@ -13,6 +13,7 @@ UI 原地编辑消息(editMessageText), 不刷屏。改 sing-box 前备份, chec
 from __future__ import annotations
 import hashlib, http.client, io, json, os, plistlib, re, shutil, socket, subprocess, sys, tarfile, tempfile, threading, time, uuid
 import urllib.parse, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor
 from collections import Counter
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -38,6 +39,8 @@ MOSDNS_DIRECT = "/etc/mosdns/rules/custom_direct.txt"
 RS_META = "/opt/pdg-bot/rulesets.json"
 UPDATE_SCRIPT = "/opt/pdg-bot/update-rules.sh"
 IOS_TMPL = "/opt/pdg-bot/pdg-dot.mobileconfig.tmpl"
+IOS_WWW_DIR = "/opt/pdg-bot/ios-www"
+IOS_PROFILE_PORT = 8111
 CERT = os.environ.get("PDG_CERT", "/etc/mosdns/certs/fullchain.pem")
 CERT_DIR = os.path.dirname(CERT)
 ADMIN_TOKEN_FILE = "/etc/privdns-gateway/admin.token"
@@ -47,31 +50,85 @@ API = "https://api.telegram.org/bot" + TOKEN
 state: dict[int, str] = {}
 del_sel: dict[int, set] = {}   # 删规则多选: chat -> 已勾选域名集合
 pending_outbound: dict[int, dict] = {}  # 添加出口确认前的脱敏预览数据
+CONSOLE: dict[int, int] = {}             # 每个聊天当前可编辑的控制台消息
+CONSOLE_KB: dict[int, dict] = {}         # 控制台最近一次键盘，供输入结果复用
+BUSY: set[tuple[int, int]] = set()       # 同一条按钮消息只允许一个慢操作
 
-# ── Telegram (复用一条 HTTPS 长连接, 省掉每次 TLS 握手 → 按钮响应更快) ──
-_conn = None
+# ── Telegram (轮询与后台操作分开复用长连接) ──
+_TG_LOCAL = threading.local()
+_BG_EXECUTOR = ThreadPoolExecutor(max_workers=6, thread_name_prefix="pdg-bg")
+_TG_API_TIMEOUT = 12
+_TG_POLL_TIMEOUT = 35
+_TG_API_IDLE_SECONDS = 25
+
+
+def _tg_slot(method):
+    return "poll" if method == "getUpdates" else "api"
+
+
+def _close_tg_conn(slot):
+    conn = getattr(_TG_LOCAL, slot + "_conn", None)
+    if conn is not None:
+        try:
+            conn.close()
+        except OSError:
+            pass
+    setattr(_TG_LOCAL, slot + "_conn", None)
+    setattr(_TG_LOCAL, slot + "_last_used", 0.0)
+
+
+def _configure_tg_socket(conn, timeout):
+    conn.timeout = timeout
+    sock = getattr(conn, "sock", None)
+    if sock is None:
+        return
+    try:
+        sock.settimeout(timeout)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        for name, value in (("TCP_KEEPIDLE", 15), ("TCP_KEEPINTVL", 5), ("TCP_KEEPCNT", 3)):
+            option = getattr(socket, name, None)
+            if option is not None:
+                sock.setsockopt(socket.IPPROTO_TCP, option, value)
+    except OSError:
+        pass
+
 
 def post(method, params):
-    global _conn
     body = json.dumps(params).encode()
     path = "/bot" + TOKEN + "/" + method
     hdr = {"Content-Type": "application/json", "Connection": "keep-alive"}
-    for attempt in (0, 1):                       # 连接断了就重连重试一次
+    slot = _tg_slot(method)
+    timeout = _TG_POLL_TIMEOUT if slot == "poll" else _TG_API_TIMEOUT
+    last_used = getattr(_TG_LOCAL, slot + "_last_used", 0.0)
+    if slot == "api" and getattr(_TG_LOCAL, slot + "_conn", None) is not None \
+            and time.monotonic() - last_used > _TG_API_IDLE_SECONDS:
+        _close_tg_conn(slot)
+    for attempt in (0, 1):
         try:
-            if _conn is None:
-                _conn = http.client.HTTPSConnection("api.telegram.org", timeout=70)
-            _conn.request("POST", path, body, hdr)
-            data = _conn.getresponse().read()
+            conn = getattr(_TG_LOCAL, slot + "_conn", None)
+            if conn is None:
+                conn = http.client.HTTPSConnection("api.telegram.org", timeout=timeout)
+                setattr(_TG_LOCAL, slot + "_conn", conn)
+            _configure_tg_socket(conn, timeout)
+            conn.request("POST", path, body, hdr)
+            _configure_tg_socket(conn, timeout)
+            data = conn.getresponse().read()
+            setattr(_TG_LOCAL, slot + "_last_used", time.monotonic())
             return json.loads(data) if data else {}
         except Exception as e:  # noqa: BLE001
-            try:
-                if _conn:
-                    _conn.close()
-            except Exception:  # noqa: BLE001
-                pass
-            _conn = None
+            _close_tg_conn(slot)
             if attempt:
-                print("api", method, e); return {}
+                print("api", method, e)
+                return {}
+
+
+def background(fn, *args):
+    def run_in_background():
+        try:
+            fn(*args)
+        except Exception as error:  # noqa: BLE001
+            print("background", getattr(fn, "__name__", "operation"), error, flush=True)
+    _BG_EXECUTOR.submit(run_in_background)
 
 def send_document(chat, filename, data, caption=""):
     """multipart/form-data 上传文件 (备份 / iOS 描述文件)。"""
@@ -92,6 +149,28 @@ def send_document(chat, filename, data, caption=""):
             return json.load(r)
     except Exception as e:  # noqa: BLE001
         print("senddoc", e); send_plain(chat, f"发送文件失败: {e}"); return {}
+
+def send_photo(chat, filename, data, caption=""):
+    """multipart/form-data 上传二维码图片。"""
+    boundary = "----pdg-photo" + uuid.uuid4().hex
+    fields = [f"--{boundary}\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\n{chat}\r\n"]
+    if caption:
+        fields.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"caption\"\r\n\r\n{caption}\r\n")
+        fields.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"parse_mode\"\r\n\r\nHTML\r\n")
+    head = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; "
+            f"filename=\"{filename}\"\r\nContent-Type: image/png\r\n\r\n").encode()
+    body = "".join(fields).encode() + head + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        API + "/sendPhoto", data=body,
+        headers={"Content-Type": "multipart/form-data; boundary=" + boundary},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as response:
+            return bool(json.load(response).get("ok"))
+    except (OSError, ValueError) as error:
+        print("sendphoto", error)
+        return False
+
 
 def tg_download(file_id):
     r = post("getFile", {"file_id": file_id})
@@ -139,7 +218,7 @@ def _nav(key):
             [{"text": "✏️ 改规则集名", "callback_data": "edit_rs"}, {"text": "🔎 测域名(查走哪)", "callback_data": "testdom"}]]),
         "client": (f"📱 <b>客户端接入</b>\nAndroid 私密DNS 填: <code>{_dot_host()}</code>\niOS 点下方生成描述文件:", [
             [{"text": "🖥 管理面板", "callback_data": "admin"}],
-            [{"text": "📱 iOS 描述文件", "callback_data": "ios"}],
+            [{"text": "📱 iOS 二维码/文件", "callback_data": "ios"}],
             [{"text": "🌐 DoT 自定义域名", "callback_data": "setdot"}],
             [{"text": "✈️ Telegram 出口", "callback_data": "tgexit"}]]),
         "ops": ("🛠 <b>运维</b> — 选一项:", [
@@ -154,28 +233,71 @@ def _nav(key):
 def send(chat, text, kb=None):
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML",
          "reply_markup": kb or MENU, "disable_web_page_preview": True}
-    if not post("sendMessage", p).get("ok"):
-        p.pop("parse_mode", None)   # HTML 解析失败(文本含 < & 等, 如 sing-box 报错)→ 退回纯文本, 保证消息+键盘送达
-        post("sendMessage", p)
+    result = post("sendMessage", p)
+    if not result.get("ok"):
+        p.pop("parse_mode", None)   # HTML 解析失败时退回纯文本, 保证消息+键盘送达
+        result = post("sendMessage", p)
+    mid = result.get("result", {}).get("message_id") if result.get("ok") else None
+    if mid is not None:
+        CONSOLE[chat] = mid
+        CONSOLE_KB[chat] = kb or MENU
+    return mid
+
 
 def send_plain(chat, text):
-    """纯文本回复, 不挂任何键盘 (操作结果/确认用, 避免每次刷出整排菜单)。"""
+    """纯文本回复, 不挂键盘；不改变当前控制台消息。"""
     p = {"chat_id": chat, "text": text, "parse_mode": "HTML",
          "disable_web_page_preview": True}
-    if post("sendMessage", p).get("ok"):
-        return
+    result = post("sendMessage", p)
+    if result.get("ok"):
+        return result.get("result", {}).get("message_id")
     p.pop("parse_mode", None)
-    post("sendMessage", p)
+    result = post("sendMessage", p)
+    return result.get("result", {}).get("message_id") if result.get("ok") else None
+
+
+def delete_message(chat, mid):
+    if mid is None:
+        return False
+    return bool(post("deleteMessage", {"chat_id": chat, "message_id": mid}).get("ok"))
+
+
+def delete_sensitive_message(chat, mid):
+    if not delete_message(chat, mid):
+        send_plain(chat, "⚠️ 未能自动删除刚才的节点消息，请手动删除其中的密码/密钥。")
+
 
 def edit(chat, mid, text, kb=None):
     p = {"chat_id": chat, "message_id": mid, "text": text, "parse_mode": "HTML",
          "reply_markup": kb or MENU, "disable_web_page_preview": True}
-    if post("editMessageText", p).get("ok"):
-        return
-    p.pop("parse_mode", None)        # 先退回纯文本重试编辑(原地保留键盘)
-    if post("editMessageText", p).get("ok"):
-        return
-    send(chat, text, kb)             # 仍不行(如消息已删)再发新消息
+    result = post("editMessageText", p)
+    if result.get("ok") or "not modified" in str(result).lower():
+        CONSOLE[chat] = mid
+        CONSOLE_KB[chat] = kb or MENU
+        return mid
+    p.pop("parse_mode", None)        # 先退回纯文本重试(原地保留键盘)
+    result = post("editMessageText", p)
+    if result.get("ok") or "not modified" in str(result).lower():
+        CONSOLE[chat] = mid
+        CONSOLE_KB[chat] = kb or MENU
+        return mid
+    return send(chat, text, kb)       # 消息已删/过期时重新建立控制台
+
+
+def reanchor_console(chat, text, kb=None):
+    old = CONSOLE.pop(chat, None)
+    CONSOLE_KB.pop(chat, None)
+    mid = send(chat, text, kb)
+    if old is not None and old != mid:
+        background(delete_message, chat, old)
+    return mid
+
+
+def edit_console(chat, text, kb=None):
+    mid = CONSOLE.get(chat)
+    if mid is None:
+        return send(chat, text, kb)
+    return edit(chat, mid, text, kb or CONSOLE_KB.get(chat) or MENU)
 
 def answer_cb_async(cb_id):
     """后台停掉按钮转圈(独立连接, 不占用主 keep-alive、不阻塞主循环)。
@@ -511,9 +633,15 @@ def add_ruleset(url, target, label=""):
         cc["route"].setdefault("rule_set", [])
         cc["route"]["rule_set"] = [r for r in cc["route"]["rule_set"] if r.get("tag") != name]
         cc["route"]["rule_set"].append({"tag": name, "type": "local", "format": fmt, "path": path})
-        cc["route"]["rules"] = [r for r in cc["route"]["rules"] if r.get("rule_set") != name]
-        cc["route"]["rules"].append({"rule_set": name, "outbound": target})
-        _gateway.prioritize_route_rules(cc)
+        replacement = {"rule_set": name, "outbound": target}
+        for index, rule in enumerate(cc["route"]["rules"]):
+            if rule.get("rule_set") == name:
+                cc["route"]["rules"][index] = replacement
+                break
+        else:
+            cc["route"]["rules"].append(replacement)
+        if not os.path.exists(_gateway.rule_order_marker_path):
+            _gateway.prioritize_route_rules(cc)
     ok, msg = apply_sb(mod)
     if ok:
         m = _rs_meta(); m[name] = {"url": url, "outbound": target, "format": fmt,
@@ -787,42 +915,54 @@ def start_update():
     except Exception:  # noqa: BLE001
         return False
 
-# ── 单条规则增删：Bot 与 PWA 共用 GatewayService ──
-def add_rule(domain, target):
+# ── 规则增删：Bot 与 PWA 共用 GatewayService ──
+def add_rules(values, target):
     target = "direct" if target == "直连" else target
     try:
-        result = _gateway.set_rule(domain, target)
-        return True, f"已把 {result['domain']} → {result['target']}"
+        if any("/" in value for value in values):
+            if target == "direct":
+                return False, "CIDR 规则请选择具体出口（如 jp），不能用 direct"
+            if not all("/" in value for value in values):
+                return False, "域名和 CIDR 请分开提交"
+            result = _gateway.set_cidrs(values, target)
+        else:
+            result = _gateway.set_rules(values, target)
+        return True, f"已保存 {result['count']} 条规则 → {result['target']}"
     except ServiceError as error:
         return False, str(error)
 
-def del_rule(domain):
+
+def add_rule(domain, target):
+    return add_rules([domain], target)
+
+
+def del_rule(value):
     try:
-        result = _gateway.remove_rule(domain)
+        result = _gateway.remove_cidr(value) if "/" in value else _gateway.remove_rule(value)
         return True, f"已删除 {result['deleted']}"
     except ServiceError as error:
         return False, str(error)
 
 def deletable_domains():
-    """可删的单域名规则: [(域名, 显示文字)]。含各出口的 domain(_suffix) 与自定义直连表。"""
+    """可删的单域名/CIDR 规则: [(值, 显示文字)]。"""
     c = load(); items = []
     for r in c["route"]["rules"]:
         if "outbound" not in r or r.get("rule_set"):
             continue
-        for d in r.get("domain_suffix", []) + r.get("domain", []):
+        for d in r.get("domain_suffix", []) + r.get("domain", []) + r.get("ip_cidr", []):
             items.append((d, f"{d} → {r['outbound']}"))
     for d in _read_direct():
         items.append((d, f"{d}(直连)"))
     return items
 
 def del_rules_bulk(domains):
-    """一次删除多个域名(出口规则 + 直连表), 只重启一次 sing-box。"""
+    """一次删除多个域名/CIDR（出口规则 + 直连表），只重启一次 sing-box。"""
     domains = {d.strip().lower() for d in domains if d.strip()}
     if not domains:
-        return False, "没勾选任何域名"
+        return False, "没勾选任何规则"
     def mod(cc):
         for r in cc["route"]["rules"]:
-            for k in ("domain_suffix", "domain"):
+            for k in ("domain_suffix", "domain", "ip_cidr"):
                 if r.get(k):
                     r[k] = [d for d in r[k] if d not in domains]
         cc["route"]["rules"] = [r for r in cc["route"]["rules"]
@@ -835,7 +975,7 @@ def del_rules_bulk(domains):
     cur = _read_direct(); hit = [x for x in cur if x in domains]
     if hit:
         _write_direct([x for x in cur if x not in domains])   # 直连表改 mosdns 文件(与原 del_rule 一致, 不重启 mosdns)
-    return True, f"✅ 已删除 {len(domains)} 个域名" + (f"(含直连 {len(hit)} 个)" if hit else "")
+    return True, f"✅ 已删除 {len(domains)} 条规则" + (f"(含直连 {len(hit)} 个)" if hit else "")
 
 def del_rule_kb(chat, back=RULE_BACK):
     """删规则多选键盘: 勾选/取消, 底部确认删除(N)。"""
@@ -863,26 +1003,9 @@ def editable_rules(c):
             name = meta.get(r["rule_set"], {}).get("label") or r["rule_set"]   # 用显示名(改过名的), 没有才回退 rs_xxxx
             out.append((i, f'{r["outbound"]}: 规则集 {name}'))
         else:
-            doms = r.get("domain_suffix", []) + r.get("domain", [])
-            if doms:
-                out.append((i, f'{r["outbound"]}: ' + ", ".join(doms[:4]) + (" …" if len(doms) > 4 else "")))
-    return out
-
-def _merge_domain_rules(rules):
-    """同一出口的多条域名规则合并为一条, 保持其余规则顺序。"""
-    seen = {}; out = []
-    for r in rules:
-        if r.get("outbound") and "rule_set" not in r and (r.get("domain_suffix") or r.get("domain")):
-            t = r["outbound"]
-            if t in seen:
-                base = seen[t]
-                for k in ("domain_suffix", "domain"):
-                    if r.get(k):
-                        base.setdefault(k, [])
-                        base[k] += [x for x in r[k] if x not in base[k]]
-                continue
-            seen[t] = r
-        out.append(r)
+            values = r.get("domain_suffix", []) + r.get("domain", []) + r.get("ip_cidr", [])
+            if values:
+                out.append((i, f'{r["outbound"]}: ' + ", ".join(values[:4]) + (" …" if len(values) > 4 else "")))
     return out
 
 def reassign_rule(idx, target):
@@ -896,8 +1019,6 @@ def reassign_rule(idx, target):
         return True, f"已经是 {target}, 未改动"
     def mod(cc):
         cc["route"]["rules"][idx]["outbound"] = target
-        cc["route"]["rules"] = _merge_domain_rules(cc["route"]["rules"])
-        _gateway.prioritize_route_rules(cc)
     ok, msg = apply_sb(mod)
     return ok, (f"✅ 该规则出口 {old} → {target}" if ok else msg)
 
@@ -1082,6 +1203,10 @@ def set_dot_domain(domain):
     sh(["systemctl", "restart", "pdg-admin"])
     global _DOT_HOST
     _DOT_HOST = None  # 让 _dot_host() 重新读新证书 CN
+    try:
+        refresh_ios_download_profile()
+    except OSError as error:
+        return False, f"证书已签发，但 iOS 描述文件更新失败: {error}"
     return True, (f"✅ DoT 域名已设为 <b>{domain}</b>\n"
                   f"• 手机私密 DNS 改成: <code>{domain}</code>\n"
                   "• 证书已签发, certbot.timer 自动续期\n"
@@ -1089,11 +1214,10 @@ def set_dot_domain(domain):
 
 # ── iOS 描述文件 ──
 def _ios_profile(ssids=()):
-    """ssids 非空时在 OnDemandRules 最前插一条「命中这些 SSID 的 Wi-Fi 强制直连(不启用 DoT)」;
-    其余 Wi-Fi/蜂窝仍按模板里的 :81 探测判定。用 plistlib 插入, SSID 含 &<> 等也不会破 XML。"""
+    """生成 iOS 描述文件；可选 SSID 规则只影响当前下发文件。"""
     if not os.path.exists(IOS_TMPL):
         raise FileNotFoundError("缺少模板 " + IOS_TMPL)
-    t = open(IOS_TMPL).read()
+    t = open(IOS_TMPL, encoding="utf-8").read()
     raw = (t.replace("__DOT_HOST__", _dot_host())
             .replace("__JP_IP__", _server_ip())
             .replace("__UUID1__", str(uuid.uuid4()).upper())
@@ -1104,6 +1228,110 @@ def _ios_profile(ssids=()):
     p["PayloadContent"][0]["OnDemandRules"].insert(
         0, {"InterfaceTypeMatch": "WiFi", "SSIDMatch": list(ssids), "Action": "Disconnect"})
     return plistlib.dumps(p)
+
+
+def _ios_download_host():
+    try:
+        with open("/opt/pdg-bot/dot-domain", encoding="utf-8") as handle:
+            domain = handle.read().strip()
+    except OSError:
+        domain = _dot_host()
+    return domain or "?"
+
+
+def _ios_profile_url(filename="ios-dot.mobileconfig"):
+    return "http://%s:%d/%s" % (_ios_download_host(), IOS_PROFILE_PORT, filename)
+
+
+def _ios_profile_name(filename):
+    if not re.fullmatch(r"(?:ios-dot|ios-[0-9a-f]{12})\.mobileconfig", filename):
+        raise ValueError("非法 iOS 描述文件名")
+    return filename
+
+
+def _update_ios_profile_allowlist(filename):
+    filename = _ios_profile_name(filename)
+    allowlist = os.path.join(IOS_WWW_DIR, ".ios-profile-allowlist")
+    names = {filename}
+    try:
+        with open(allowlist, encoding="ascii") as handle:
+            for name in handle:
+                name = name.strip()
+                if not re.fullmatch(r"(?:ios-dot|ios-[0-9a-f]{12})\.mobileconfig", name):
+                    continue
+                candidate = os.path.realpath(os.path.join(IOS_WWW_DIR, name))
+                if os.path.dirname(candidate) == os.path.realpath(IOS_WWW_DIR) and os.path.isfile(candidate):
+                    names.add(name)
+    except FileNotFoundError:
+        pass
+    fd, temp_name = tempfile.mkstemp(prefix=".ios-allowlist-", dir=IOS_WWW_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="ascii") as handle:
+            handle.write("".join(name + "\n" for name in sorted(names)))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o644)
+        os.replace(temp_name, allowlist)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _publish_ios_profile(data, custom=False):
+    os.makedirs(IOS_WWW_DIR, mode=0o755, exist_ok=True)
+    filename = "ios-dot.mobileconfig"
+    if custom:
+        filename = "ios-%s.mobileconfig" % uuid.uuid4().hex[:12]
+    filename = _ios_profile_name(filename)
+    target = os.path.join(IOS_WWW_DIR, filename)
+    fd, temp_name = tempfile.mkstemp(prefix=".ios-profile-", dir=IOS_WWW_DIR)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temp_name, 0o644)
+        os.replace(temp_name, target)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+    _update_ios_profile_allowlist(filename)
+    return _ios_profile_url(filename)
+
+
+def _send_ios_assets(chat, profile, caption, custom=False):
+    url = _publish_ios_profile(profile, custom=custom)
+    qr_path = None
+    try:
+        fd, qr_path = tempfile.mkstemp(prefix="pdg-ios-qr-", suffix=".png")
+        os.close(fd)
+        result = subprocess.run(
+            ["qrencode", "-o", qr_path, "-s", "8", "-m", "2", url],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            with open(qr_path, "rb") as handle:
+                if not send_photo(chat, "PrivDNS-Gateway-iOS-QR.png", handle.read(),
+                                  caption + "\n下载地址: <code>%s</code>" % url):
+                    send_plain(chat, "二维码发送失败，请用此地址打开：<code>%s</code>" % url)
+        else:
+            send_plain(chat, "二维码生成失败，请用此地址打开：<code>%s</code>" % url)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as error:
+        print("ios qr", error)
+        send_plain(chat, "当前无法生成二维码，请用此地址打开：<code>%s</code>" % url)
+    finally:
+        if qr_path:
+            try:
+                os.unlink(qr_path)
+            except OSError:
+                pass
+    send_document(chat, "PrivDNS-Gateway.mobileconfig", profile, caption)
+    return url
+
+
+def refresh_ios_download_profile():
+    """更新常驻 8111 提供的默认文件，域名变更后由 Bot 调用。"""
+    return _publish_ios_profile(_ios_profile())
 
 # ── 配置备份 / 恢复 ──
 BACKUP_FILES = [SB, MOSDNS_CONF, MOSDNS_DIRECT, RS_META]
@@ -1412,7 +1640,7 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, rules_text(), RULE_BACK); return
     if data == "add_exit":
         pending_outbound.pop(chat, None); state[chat] = "add_exit"
-        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless://(含 reality) hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n解析后会先显示脱敏预览，确认才应用。/cancel 取消。", EXIT_BACK); return
+        edit(chat, mid, "发一条节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria:// hysteria2:// tuic:// anytls:// shadowtls:// ssh:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行\n解析后会先显示脱敏预览，确认才应用。/cancel 取消。", EXIT_BACK); return
     if data == "addxok":
         ob = pending_outbound.pop(chat, None)
         if not ob:
@@ -1438,7 +1666,7 @@ def handle_cb(chat, mid, data):
              "建好后可作为默认策略或分流目标。/cancel 取消。", EXIT_BACK); return
     if data == "add_rule":
         state[chat] = "add_rule"
-        edit(chat, mid, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n例: <code>netflix.com hk</code> / <code>x.cn direct</code>\n/cancel 取消。", RULE_BACK); return
+        edit(chat, mid, f"发「<b>域名/CIDR… 出口</b>」，最后一项是出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>\n可一次粘贴多个域名；CIDR 请单独提交且选择具体出口。\n例: <code>netflix.com youtube.com hk</code> / <code>10.0.0.0/8 jp</code>\n/cancel 取消。", RULE_BACK); return
     if data == "edit_rule":
         rs = editable_rules(load())
         if not rs:
@@ -1492,7 +1720,7 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, msg if ok else ("❌ " + msg), RULE_BACK); return
     if data == "testdom":
         state[chat] = "test_dom"
-        edit(chat, mid, "发个域名, 查它走哪个出口/规则(还是国内直连)。\n例: <code>netflix.com</code>\n/cancel 取消。", RULE_BACK); return
+        edit(chat, mid, "发域名或 IP，查询最终出口/命中规则。\n例: <code>netflix.com</code> / <code>10.1.2.3</code>\n/cancel 取消。", RULE_BACK); return
     if data == "add_rs":
         state[chat] = "add_rs"
         edit(chat, mid, "发「<b>规则集URL 出口 [名称]</b>」(后缀 .list / .txt / .srs)。\n"
@@ -1559,13 +1787,13 @@ def handle_cb(chat, mid, data):
                                   [{"text": "🏠 主菜单", "callback_data": "menu"}]]}); return
     if data == "iosgen":
         state.pop(chat, None)
-        edit(chat, mid, "正在生成 iOS 描述文件…", BACK)
+        edit(chat, mid, "正在生成 iOS 二维码和描述文件…", BACK)
         try:
-            send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(),
-                          f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
-                          "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。\n"
-                          "Wi-Fi/蜂窝均靠服务器 :81 探测激活, 安装时已自动配好。")
-            edit(chat, mid, "✅ 描述文件已发送(见上一条)。", MENU)
+            caption = (f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
+                       "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。\n"
+                       "Wi-Fi/蜂窝均靠服务器 :81 探测激活, 安装时已自动配好。")
+            url = _send_ios_assets(chat, _ios_profile(), caption)
+            edit(chat, mid, "✅ iOS 二维码和描述文件已发送。\n下载地址: <code>%s</code>" % url, MENU)
         except Exception as e:  # noqa: BLE001
             edit(chat, mid, f"生成失败: {e}", MENU)
         return
@@ -1664,29 +1892,63 @@ def handle_cb(chat, mid, data):
 
 # ── 文本 ──
 def _input_result(chat, ok, message):
-    """成功才结束输入态；失败允许直接修正后重试。"""
+    """成功才结束输入态；有控制台时原地更新，否则退回纯文本。"""
     if ok:
         state.pop(chat, None)
         prefix = "" if message.startswith("✅") else "✅ "
-        send_plain(chat, prefix + message)
+        text = prefix + message
     else:
-        send_plain(chat, "❌ " + message + "\n\n仍在当前操作，可重新输入，或 /cancel 取消。")
+        text = "❌ " + message + "\n\n仍在当前操作，可重新输入，或 /cancel 取消。"
+    if CONSOLE.get(chat) is not None:
+        edit_console(chat, text, CONSOLE_KB.get(chat) or MENU)
+    else:
+        send_plain(chat, text)
 
 
-def handle_text(chat, text):
+def console_async(chat, progress, operation, kb=BACK):
+    mid = edit_console(chat, progress, kb)
+
+    def run_operation():
+        try:
+            result = operation()
+        except Exception as error:  # noqa: BLE001
+            result = "❌ 操作失败: %s" % error
+        edit(chat, mid, result, kb)
+
+    background(run_operation)
+
+
+def input_async(chat, progress, operation):
+    edit_console(chat, progress, CONSOLE_KB.get(chat) or MENU)
+
+    def run_operation():
+        try:
+            ok, message = operation()
+        except Exception as error:  # noqa: BLE001
+            ok, message = False, "操作失败: %s" % error
+        _input_result(chat, ok, message)
+
+    background(run_operation)
+
+
+def handle_text(chat, text, message_id=None):
     text = text.strip()
     if text == "/cancel":
         state.pop(chat, None); del_sel.pop(chat, None); pending_outbound.pop(chat, None)
-        send_plain(chat, "已取消"); return
+        if CONSOLE.get(chat) is not None:
+            edit_console(chat, "已取消", CONSOLE_KB.get(chat) or MENU)
+        else:
+            send_plain(chat, "已取消")
+        return
     if text in ("/start", "/menu", "/status"):
         state.pop(chat, None); del_sel.pop(chat, None); pending_outbound.pop(chat, None)
-        send(chat, status_text()); return
+        reanchor_console(chat, status_text(), MENU); return
     if text.startswith("/"):
         cmd = text.split()[0]
         if cmd == "/test":
-            send_plain(chat, "测试中…"); send_plain(chat, test_exits()); return
+            console_async(chat, "测试中…", test_exits); return
         if cmd == "/doctor":
-            send_plain(chat, "🩺 自检中…"); send(chat, doctor_text(), BACK); return
+            console_async(chat, "🩺 自检中…", doctor_text); return
         if cmd == "/traffic":
             send(chat, traffic_text(), BACK); return
         if cmd == "/exits":
@@ -1695,11 +1957,11 @@ def handle_text(chat, text):
             send(chat, rules_text(), BACK); return
         if cmd == "/addexit":
             pending_outbound.pop(chat, None); state[chat] = "add_exit"
-            send(chat, "发节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria2:// tuic:// anytls:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行。解析后确认才应用。/cancel 取消。", BACK); return
+            send(chat, "发节点链接：<code>ss:// vmess:// trojan:// vless:// hysteria:// hysteria2:// tuic:// anytls:// shadowtls:// ssh:// socks5:// http://</code>,或 Surge 的 <code>名字 = ss, …</code> 行。解析后确认才应用。/cancel 取消。", BACK); return
         if cmd == "/group":
             state[chat] = "add_group"; send(chat, "发「<b>组名 出口1 出口2 …</b>」创建策略组（默认自动优选）。/cancel 取消。", BACK); return
         if cmd == "/addrule":
-            state[chat] = "add_rule"; send(chat, f"发「<b>域名 出口</b>」，出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>。/cancel 取消。", BACK); return
+            state[chat] = "add_rule"; send(chat, f"发「<b>域名/CIDR… 出口</b>」，最后一项是出口: {', '.join(exit_tags(load()))} 或 <b>direct</b>。/cancel 取消。", BACK); return
         if cmd == "/delrule":
             state[chat] = "del_rule"; send(chat, "发要删除的域名。/cancel 取消。", BACK); return
         if cmd == "/addrs":
@@ -1720,7 +1982,8 @@ def handle_text(chat, text):
             send(chat, "管理面板仅在内网卡网络下可达。", {"inline_keyboard": [*rows, *_back_rows(BACK)]}); return
         if cmd == "/ios":
             try:
-                send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(), "📱 iOS 私密DNS 描述文件"); send_plain(chat, "✅ 已发送")
+                url = _send_ios_assets(chat, _ios_profile(), "📱 iOS 私密DNS 描述文件")
+                send_plain(chat, "✅ 二维码和描述文件已发送\n下载地址: <code>%s</code>" % url)
             except Exception as e:  # noqa: BLE001
                 send_plain(chat, f"生成失败: {e}")
             return
@@ -1731,8 +1994,9 @@ def handle_text(chat, text):
         if cmd == "/setdot":
             parts = text.split()
             if len(parts) >= 2:
-                send_plain(chat, "正在校验+签证书(约 30-60 秒, 代理短暂中断)…")
-                ok, msg = set_dot_domain(parts[1]); send_plain(chat, msg if ok else ("❌ " + msg)); return
+                reanchor_console(chat, "正在校验+签证书(约 30-60 秒, 代理短暂中断)…", BACK)
+                input_async(chat, "正在校验+签证书(约 30-60 秒, 代理短暂中断)…",
+                            lambda: set_dot_domain(parts[1])); return
             state[chat] = "set_dot"; send(chat, f"发自定义 DoT 域名(A 记录先指向本机 {_server_ip()})。/cancel 取消。", BACK); return
         if cmd == "/restart":
             ok, _ = apply_sb(lambda c: None); sh(["systemctl", "restart", "mosdns"]); send_plain(chat, "✅ 已重启" if ok else "重启失败"); return
@@ -1742,6 +2006,8 @@ def handle_text(chat, text):
         send_plain(chat, "未识别命令，发 /start 打开菜单"); return
     act = state.get(chat, "")
     if act == "add_exit":
+        if message_id is not None:
+            background(delete_sensitive_message, chat, message_id)
         try:
             ob = parse_link(text)
             pending_outbound[chat] = ob; state.pop(chat, None)
@@ -1767,9 +2033,9 @@ def handle_text(chat, text):
         _input_result(chat, ok, msg); return
     if act == "add_rule":
         p = text.split()
-        if len(p) != 2:
-            _input_result(chat, False, "格式: 域名 出口"); return
-        ok, msg = add_rule(p[0], p[1]); _input_result(chat, ok, msg); return
+        if len(p) < 2:
+            _input_result(chat, False, "格式: 域名/CIDR… 出口（最后一项是出口）"); return
+        ok, msg = add_rules(p[:-1], p[-1]); _input_result(chat, ok, msg); return
     if act == "del_rule":
         ok, msg = del_rule(text); _input_result(chat, ok, msg); return
     if act == "test_dom":
@@ -1778,8 +2044,8 @@ def handle_text(chat, text):
         p = text.split()
         if len(p) < 2:
             _input_result(chat, False, "格式: 规则集URL 出口 [名称]"); return
-        send_plain(chat, "正在下载规则集…")
-        ok, msg = add_ruleset(p[0], p[1], " ".join(p[2:])); _input_result(chat, ok, msg); return
+        input_async(chat, "正在下载规则集…",
+                    lambda: add_ruleset(p[0], p[1], " ".join(p[2:]))); return
     if act.startswith("rs_label:"):
         name = act.split(":", 1)[1]
         ok, msg = set_ruleset_label(name, "" if text.strip() == "-" else text)
@@ -1787,12 +2053,13 @@ def handle_text(chat, text):
     if act == "ios_ssid":
         ssids = [] if text.strip() == "-" else [l.strip()[:32] for l in text.splitlines() if l.strip()][:8]
         try:
-            send_document(chat, "PrivDNS-Gateway.mobileconfig", _ios_profile(ssids),
-                          f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
-                          + (("强制直连 Wi-Fi: " + ", ".join(ssids) + "\n") if ssids else "")
-                          + "装法: 存到「文件」App → 点开 → 设置→通用→「已下载描述文件」→ 安装。")
+            caption = (f"📱 iOS/iPadOS 私密DNS 描述文件\nDoT: {_dot_host()}\n"
+                       + (("强制直连 Wi-Fi: " + _esc(", ".join(ssids)) + "\n") if ssids else "")
+                       + "扫码后 Safari 会打开 8111 下载地址；也可直接保存下方文件。")
+            url = _send_ios_assets(chat, _ios_profile(ssids), caption, custom=bool(ssids))
             state.pop(chat, None)
-            send_plain(chat, "✅ 已生成" + (f", {len(ssids)} 个 Wi-Fi 设为强制直连" if ssids else ""))
+            edit_console(chat, "✅ 二维码和描述文件已发送。\n下载地址: <code>%s</code>" % url,
+                         CONSOLE_KB.get(chat) or MENU)
         except Exception as e:  # noqa: BLE001
             _input_result(chat, False, f"生成失败: {e}")
         return
@@ -1802,8 +2069,8 @@ def handle_text(chat, text):
             _input_result(chat, False, "格式: remote|local 地址1 [地址2 …]"); return
         ok, msg = set_mosdns_upstream(p[0].lower(), p[1:]); _input_result(chat, ok, msg); return
     if act == "set_dot":
-        send_plain(chat, "正在校验域名并签发证书(约 30-60 秒, 期间代理短暂中断)…")
-        ok, msg = set_dot_domain(text); _input_result(chat, ok, msg); return
+        input_async(chat, "正在校验域名并签发证书(约 30-60 秒, 期间代理短暂中断)…",
+                    lambda: set_dot_domain(text)); return
     if act == "restore":
         send_plain(chat, "请把备份 <code>.tar.gz</code> 作为「文件」发来, 而不是文字。/cancel 取消。"); state[chat] = "restore"; return
     # 裸发一个像域名的文本: 当作想设 DoT 域名, 给一键按钮 (省得先点菜单进状态)
@@ -1821,16 +2088,33 @@ def handle_document(chat, doc):
     if state.get(chat) != "restore":
         send_plain(chat, "如要恢复配置: 先点菜单「♻️ 恢复」再发备份文件。"); return
     state.pop(chat, None)
-    send_plain(chat, "正在校验并恢复…")
+    edit_console(chat, "正在校验并恢复…", CONSOLE_KB.get(chat) or BACK)
+
+    def restore_operation():
+        try:
+            data = tg_download(doc["file_id"])
+            ok, msg = restore_from(data)
+        except Exception as error:  # noqa: BLE001
+            ok, msg = False, f"恢复失败: {error}"
+        if not ok:
+            state[chat] = "restore"
+        result = ("✅ " if ok else "❌ ") + msg
+        if not ok:
+            result += "\n仍可重新发送备份文件，或 /cancel 取消。"
+        edit_console(chat, result, CONSOLE_KB.get(chat) or BACK)
+
+    background(restore_operation)
+
+def dispatch_callback(chat, mid, data):
+    key = (chat, mid)
+    if key in BUSY:
+        return
+    BUSY.add(key)
     try:
-        data = tg_download(doc["file_id"])
-        ok, msg = restore_from(data)
-    except Exception as e:  # noqa: BLE001
-        ok, msg = False, f"恢复失败: {e}"
-    if not ok:
-        state[chat] = "restore"
-    send_plain(chat, ("✅ " if ok else "❌ ") + msg
-               + ("\n仍可重新发送备份文件，或 /cancel 取消。" if not ok else ""))
+        handle_cb(chat, mid, data)
+    finally:
+        BUSY.discard(key)
+
 
 def main():
     if not TOKEN:
@@ -1844,7 +2128,7 @@ def main():
     print("pdg-bot v3 started, allowed:", ALLOWED, flush=True)
     off = 0
     while True:
-        r = post("getUpdates", {"offset": off, "timeout": 50})
+        r = post("getUpdates", {"offset": off, "timeout": 25})
         if not r.get("ok"):          # 网络/API 出错 → 退避, 别紧打循环
             time.sleep(3); continue
         for u in r.get("result", []):
@@ -1855,7 +2139,7 @@ def main():
                     if m["from"]["id"] not in ALLOWED:
                         continue
                     if "text" in m:
-                        handle_text(m["chat"]["id"], m["text"])
+                        handle_text(m["chat"]["id"], m["text"], m.get("message_id"))
                     elif "document" in m:
                         handle_document(m["chat"]["id"], m["document"])
                 elif "callback_query" in u:
@@ -1863,7 +2147,9 @@ def main():
                     # 先停按钮转圈, 再跑可能较慢的 handle_cb(检查更新/测出口/自检等)。
                     answer_cb_async(q["id"])
                     if q["from"]["id"] in ALLOWED:
-                        handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])
+                        # 后台执行 handle_cb(q["message"]["chat"]["id"], q["message"]["message_id"], q["data"])
+                        background(dispatch_callback, q["message"]["chat"]["id"],
+                                   q["message"]["message_id"], q["data"])
             except Exception as e:  # noqa: BLE001
                 print("handle err", e, flush=True)
 

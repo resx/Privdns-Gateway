@@ -58,6 +58,7 @@ class GatewayService:
         clash_url: str = "http://127.0.0.1:9090",
         ruleset_dir: str = "/etc/sing-box/rs",
         subscription_meta_path: str = "/opt/pdg-bot/subscriptions.json",
+        rule_order_marker_path: str = "/etc/privdns-gateway/rule-order.custom",
     ) -> None:
         self.control = control or SingBoxControl()
         self.direct_path = direct_path
@@ -65,6 +66,7 @@ class GatewayService:
         self.clash_url = clash_url.rstrip("/")
         self.ruleset_dir = ruleset_dir
         self.subscription_meta_path = subscription_meta_path
+        self.rule_order_marker_path = rule_order_marker_path
         self._metadata_lock = threading.RLock()
 
     def _run(self, command):
@@ -1213,23 +1215,49 @@ class GatewayService:
         return output
 
     @staticmethod
-    def prioritize_route_rules(config: dict) -> bool:
-        rules = config.setdefault("route", {}).setdefault("rules", [])
-        original = list(rules)
-        system, manual, rulesets, remaining = [], [], [], []
-        for rule in rules:
+    def _split_route_rules(config: dict) -> tuple[list[dict], list[dict], list[dict]]:
+        system, managed, remaining = [], [], []
+        for rule in config.setdefault("route", {}).setdefault("rules", []):
             if rule.get("action") or rule.get("inbound"):
                 system.append(rule)
-            elif "rule_set" not in rule and rule.get("outbound"):
-                manual.append(rule)
-            elif rule.get("rule_set"):
-                rulesets.append(rule)
-            else:
-                remaining.append(rule)
-        rules[:] = system + manual + rulesets + remaining
-        return rules != original
+                continue
+            if rule.get("outbound") and isinstance(rule.get("rule_set"), str) \
+                    and set(rule) <= {"rule_set", "outbound"}:
+                managed.append({
+                    "kind": "ruleset", "value": rule["rule_set"],
+                    "rule": {"rule_set": rule["rule_set"], "outbound": rule["outbound"]},
+                })
+                continue
+            matchers = [key for key in ("domain_suffix", "domain", "ip_cidr") if rule.get(key)]
+            if rule.get("outbound") and len(matchers) == 1 \
+                    and set(rule) <= {matchers[0], "outbound"} and isinstance(rule[matchers[0]], list):
+                key = matchers[0]
+                kind = "cidr" if key == "ip_cidr" else "domain"
+                for value in rule[key]:
+                    managed.append({
+                        "kind": kind, "value": str(value),
+                        "rule": {key: [str(value)], "outbound": rule["outbound"]},
+                    })
+                continue
+            remaining.append(rule)
+        return system, managed, remaining
+
+    @staticmethod
+    def _apply_route_parts(config: dict, system: list[dict], managed: list[dict], remaining: list[dict]) -> None:
+        config.setdefault("route", {})["rules"] = system + [item["rule"] for item in managed] + remaining
+
+    @classmethod
+    def prioritize_route_rules(cls, config: dict) -> bool:
+        original = json.dumps(config.setdefault("route", {}).setdefault("rules", []), sort_keys=True)
+        system, managed, remaining = cls._split_route_rules(config)
+        manual = [item for item in managed if item["kind"] != "ruleset"]
+        rulesets = [item for item in managed if item["kind"] == "ruleset"]
+        cls._apply_route_parts(config, system, manual + rulesets, remaining)
+        return json.dumps(config["route"]["rules"], sort_keys=True) != original
 
     def migrate_rule_priority(self) -> dict:
+        if Path(self.rule_order_marker_path).exists():
+            return {"changed": False}
         changed = {"value": False}
 
         def modify(config):
@@ -1259,9 +1287,15 @@ class GatewayService:
                 route["rule_set"] = [item for item in route["rule_set"] if item.get("tag") != tag]
                 route["rule_set"].append({"tag": tag, "type": "local", "format": fmt, "path": path})
                 route.setdefault("rules", [])
-                route["rules"] = [rule for rule in route["rules"] if rule.get("rule_set") != tag]
-                route["rules"].append({"rule_set": tag, "outbound": target})
-                self.prioritize_route_rules(config)
+                replacement = {"rule_set": tag, "outbound": target}
+                for index, rule in enumerate(route["rules"]):
+                    if rule.get("rule_set") == tag:
+                        route["rules"][index] = replacement
+                        break
+                else:
+                    route["rules"].append(replacement)
+                if not Path(self.rule_order_marker_path).exists():
+                    self.prioritize_route_rules(config)
 
             result = self.control.apply(modify)
             if not result[0]:
@@ -1298,7 +1332,6 @@ class GatewayService:
                     for rule in config.get("route", {}).get("rules", []):
                         if rule.get("rule_set") == tag:
                             rule["outbound"] = target
-                            self.prioritize_route_rules(config)
                             return
                     raise ValueError("规则集路由不存在")
                 self._check_result(self.control.apply(modify))
@@ -1357,26 +1390,17 @@ class GatewayService:
     def list_rules(self) -> list[dict]:
         config = self.control.load()
         meta = self._ruleset_meta()
+        system, managed, remaining = self._split_route_rules(config)
         rules = []
-        for route_index, item in enumerate(config.get("route", {}).get("rules", [])):
-            target = item.get("outbound")
-            if not target:
-                continue
-            if item.get("rule_set"):
-                name = item["rule_set"]
-                info = meta.get(name, {})
-                rules.append({
-                    "kind": "ruleset", "value": name,
-                    "label": info.get("label") or name, "target": target,
-                    "count": info.get("count"), "order": route_index,
-                })
-                continue
-            for domain in item.get("domain_suffix", []) + item.get("domain", []):
-                rules.append({
-                    "kind": "domain", "value": domain, "label": domain,
-                    "target": target, "order": route_index,
-                })
-        direct_offset = len(config.get("route", {}).get("rules", []))
+        for index, item in enumerate(managed, len(system)):
+            target = item["rule"]["outbound"]
+            info = meta.get(item["value"], {}) if item["kind"] == "ruleset" else {}
+            rules.append({
+                "kind": item["kind"], "value": item["value"],
+                "label": info.get("label") or item["value"], "target": target,
+                "count": info.get("count") if item["kind"] == "ruleset" else None, "order": index,
+            })
+        direct_offset = len(system) + len(managed) + len(remaining)
         rules.extend(
             {"kind": "direct", "value": domain, "label": domain, "target": "direct", "order": direct_offset + index}
             for index, domain in enumerate(self._read_direct())
@@ -1384,62 +1408,159 @@ class GatewayService:
         return rules
 
     @staticmethod
-    def _without_domain_rules(config: dict, domain: str) -> None:
-        for rule in config.get("route", {}).get("rules", []):
-            for key in ("domain_suffix", "domain"):
-                if rule.get(key):
-                    rule[key] = [value for value in rule[key] if value != domain]
-        config["route"]["rules"] = [
-            rule for rule in config["route"]["rules"]
-            if rule.get("action") or "outbound" not in rule or rule.get("rule_set")
-            or rule.get("domain_suffix") or rule.get("domain")
-            or rule.get("domain_keyword") or rule.get("ip_cidr") or rule.get("inbound")
+    def _upsert_route_entries(
+        managed: list[dict], kind: str, values: list[str], target: str, field: str, custom_order: bool,
+    ) -> list[dict]:
+        wanted = set(values)
+        replaced = set()
+        output = []
+        for item in managed:
+            if item["kind"] == kind and item["value"] in wanted:
+                if item["value"] not in replaced:
+                    value = item["value"]
+                    output.append({"kind": kind, "value": value, "rule": {field: [value], "outbound": target}})
+                    replaced.add(value)
+                continue
+            output.append(item)
+        additions = [
+            {"kind": kind, "value": value, "rule": {field: [value], "outbound": target}}
+            for value in values if value not in replaced
         ]
+        if custom_order:
+            output.extend(additions)
+        else:
+            insert_at = next((index for index, item in enumerate(output) if item["kind"] == "ruleset"), len(output))
+            output[insert_at:insert_at] = additions
+        return output
 
-    def set_rule(self, domain: str, target: str) -> dict:
-        domain = self._domain(domain)
+    @staticmethod
+    def _remove_route_entries(managed: list[dict], kind: str, values: set[str]) -> list[dict]:
+        return [item for item in managed if item["kind"] != kind or item["value"] not in values]
+
+    def _domains(self, domains: list[str]) -> list[str]:
+        if not isinstance(domains, list):
+            raise ServiceError("域名列表格式不正确")
+        output = list(dict.fromkeys(self._domain(str(domain)) for domain in domains if str(domain).strip()))
+        if not output or len(output) > 200:
+            raise ServiceError("每次需要提交 1-200 个域名")
+        return output
+
+    @staticmethod
+    def _cidr(value: str) -> str:
+        try:
+            return str(ipaddress.ip_network(value.strip(), strict=False))
+        except ValueError as error:
+            raise ServiceError(f"CIDR 格式不正确: {value}") from error
+
+    def _cidrs(self, cidrs: list[str]) -> list[str]:
+        if not isinstance(cidrs, list):
+            raise ServiceError("CIDR 列表格式不正确")
+        output = list(dict.fromkeys(self._cidr(str(cidr)) for cidr in cidrs if str(cidr).strip()))
+        if not output or len(output) > 200:
+            raise ServiceError("每次需要提交 1-200 个 CIDR")
+        return output
+
+    def set_rules(self, domains: list[str], target: str) -> dict:
+        domains = self._domains(domains)
         config = self.control.load()
         if target != "direct" and target not in exit_tags(config):
             raise ServiceError(f"出口 {target} 不存在", 404)
+        custom_order = Path(self.rule_order_marker_path).exists()
 
         def modify(value):
-            self._without_domain_rules(value, domain)
-            if target != "direct":
-                existing = next((
-                    rule for rule in value["route"]["rules"]
-                    if rule.get("outbound") == target and "rule_set" not in rule
-                    and rule.get("domain_suffix") is not None
-                ), None)
-                if existing:
-                    existing["domain_suffix"].append(domain)
-                else:
-                    value["route"]["rules"].append({"domain_suffix": [domain], "outbound": target})
-            self.prioritize_route_rules(value)
+            system, managed, remaining = self._split_route_rules(value)
+            if target == "direct":
+                managed = self._remove_route_entries(managed, "domain", set(domains))
+            else:
+                managed = self._upsert_route_entries(managed, "domain", domains, target, "domain_suffix", custom_order)
+            self._apply_route_parts(value, system, managed, remaining)
 
         self._check_result(self.control.apply(modify))
         direct = self._read_direct()
-        if target == "direct" and domain not in direct:
-            self._write_direct(direct + [domain])
-        elif target != "direct" and domain in direct:
-            self._write_direct([value for value in direct if value != domain])
-        return {"domain": domain, "target": target}
+        next_direct = [value for value in direct if value not in domains]
+        if target == "direct":
+            next_direct.extend(domain for domain in domains if domain not in next_direct)
+        if sorted(next_direct) != sorted(direct):
+            self._write_direct(next_direct)
+        return {"items": [{"domain": domain, "target": target} for domain in domains], "count": len(domains), "target": target}
+
+    def set_rule(self, domain: str, target: str) -> dict:
+        result = self.set_rules([domain], target)
+        return result["items"][0]
+
+    def set_cidrs(self, cidrs: list[str], target: str) -> dict:
+        cidrs = self._cidrs(cidrs)
+        if target not in exit_tags(self.control.load()):
+            raise ServiceError(f"出口 {target} 不存在", 404)
+        custom_order = Path(self.rule_order_marker_path).exists()
+
+        def modify(value):
+            system, managed, remaining = self._split_route_rules(value)
+            managed = self._upsert_route_entries(managed, "cidr", cidrs, target, "ip_cidr", custom_order)
+            self._apply_route_parts(value, system, managed, remaining)
+
+        self._check_result(self.control.apply(modify))
+        return {"items": [{"cidr": cidr, "target": target} for cidr in cidrs], "count": len(cidrs), "target": target}
 
     def remove_rule(self, domain: str) -> dict:
         domain = self._domain(domain)
         config = self.control.load()
-        in_config = any(
-            domain in rule.get(key, [])
-            for rule in config.get("route", {}).get("rules", [])
-            for key in ("domain_suffix", "domain")
-        )
+        _, managed, _ = self._split_route_rules(config)
+        in_config = any(item["kind"] == "domain" and item["value"] == domain for item in managed)
         direct = self._read_direct()
         if not in_config and domain not in direct:
             raise ServiceError(f"规则 {domain} 不存在", 404)
         if in_config:
-            self._check_result(self.control.apply(lambda value: self._without_domain_rules(value, domain)))
+            def modify(value):
+                system, entries, remaining = self._split_route_rules(value)
+                self._apply_route_parts(value, system, self._remove_route_entries(entries, "domain", {domain}), remaining)
+            self._check_result(self.control.apply(modify))
         if domain in direct:
             self._write_direct([value for value in direct if value != domain])
         return {"deleted": domain}
+
+    def remove_cidr(self, cidr: str) -> dict:
+        cidr = self._cidr(cidr)
+        _, managed, _ = self._split_route_rules(self.control.load())
+        if not any(item["kind"] == "cidr" and item["value"] == cidr for item in managed):
+            raise ServiceError(f"CIDR 规则 {cidr} 不存在", 404)
+
+        def modify(value):
+            system, entries, remaining = self._split_route_rules(value)
+            self._apply_route_parts(value, system, self._remove_route_entries(entries, "cidr", {cidr}), remaining)
+
+        self._check_result(self.control.apply(modify))
+        return {"deleted": cidr}
+
+    def reorder_rules(self, order: list[dict]) -> dict:
+        if not isinstance(order, list):
+            raise ServiceError("规则顺序必须是数组")
+        config = self.control.load()
+        _, managed, _ = self._split_route_rules(config)
+        current = [(item["kind"], item["value"]) for item in managed]
+        requested = []
+        for item in order:
+            if not isinstance(item, dict) or item.get("kind") not in {"domain", "cidr", "ruleset"}:
+                raise ServiceError("规则顺序格式错误")
+            requested.append((str(item["kind"]), str(item.get("value", ""))))
+        if len(set(current)) != len(current):
+            raise ServiceError("现有规则包含重复项，请先重新保存重复规则")
+        if len(requested) != len(current) or len(set(requested)) != len(requested) or set(requested) != set(current):
+            raise ServiceError("规则顺序必须包含全部可排序规则且不能重复", 409)
+        marker = Path(self.rule_order_marker_path)
+
+        def modify(value):
+            current_system, current_managed, current_remaining = self._split_route_rules(value)
+            by_key = {(item["kind"], item["value"]): item for item in current_managed}
+            if len(by_key) != len(requested) or set(by_key) != set(requested):
+                raise ValueError("规则已发生变化，请刷新后重试")
+            self._apply_route_parts(value, current_system, [by_key[key] for key in requested], current_remaining)
+
+        self._check_result(self.control.apply(modify))
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("custom\n", encoding="utf-8")
+        os.chmod(marker, 0o600)
+        return {"order": [{"kind": kind, "value": value} for kind, value in requested]}
 
     @staticmethod
     def _domain_match(domain: str, rule: dict) -> bool:
@@ -1449,9 +1570,25 @@ class GatewayService:
             return True
         return any(keyword in domain for keyword in rule.get("domain_keyword", []))
 
+    @staticmethod
+    def _ip_match(address: ipaddress.IPv4Address | ipaddress.IPv6Address, rule: dict) -> str | None:
+        for cidr in rule.get("ip_cidr", []):
+            try:
+                if address in ipaddress.ip_network(cidr, strict=False):
+                    return str(cidr)
+            except ValueError:
+                continue
+        return None
+
     def test_route(self, domain: str) -> dict:
-        domain = self._domain(domain)
-        if any(domain == item or domain.endswith("." + item) for item in self._read_direct()):
+        query = domain.strip()
+        try:
+            address = ipaddress.ip_address(query)
+            domain = str(address)
+        except ValueError:
+            address = None
+            domain = self._domain(query)
+        if address is None and any(domain == item or domain.endswith("." + item) for item in self._read_direct()):
             return {"domain": domain, "target": "direct", "kind": "direct", "match": "自定义直连"}
         config = self.control.load()
         definitions = {
@@ -1463,7 +1600,10 @@ class GatewayService:
             target = rule.get("outbound")
             if not target:
                 continue
-            if self._domain_match(domain, rule):
+            matched_cidr = self._ip_match(address, rule) if address is not None else None
+            if matched_cidr:
+                return {"domain": domain, "target": target, "kind": "cidr", "match": matched_cidr}
+            elif self._domain_match(domain, rule):
                 values = rule.get("domain", []) + rule.get("domain_suffix", []) + rule.get("domain_keyword", [])
                 return {"domain": domain, "target": target, "kind": "domain", "match": values[0] if values else domain}
             names = rule.get("rule_set")
@@ -1479,7 +1619,11 @@ class GatewayService:
                     source = json.loads(Path(definition.get("path", "")).read_text(encoding="utf-8"))
                 except (FileNotFoundError, json.JSONDecodeError, OSError):
                     continue
-                if any(self._domain_match(domain, item) for item in source.get("rules", [])):
+                if address is not None:
+                    matched = any(self._ip_match(address, item) for item in source.get("rules", []))
+                else:
+                    matched = any(self._domain_match(domain, item) for item in source.get("rules", []))
+                if matched:
                     label = meta.get(name, {}).get("label") or name
                     return {"domain": domain, "target": target, "kind": "ruleset", "match": label}
         if unresolved:

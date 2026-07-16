@@ -38,6 +38,7 @@ try:
     spec.loader.exec_module(b)
 except SystemExit:
     pass
+from pdg_links import parse_subscription
 U = "11111111-2222-3333-4444-555555555555"
 ss2022 = base64.b64encode(b"0123456789abcdef").decode()                 # 2022-blake3-aes-128-gcm 需 16B 密钥
 ssui = base64.urlsafe_b64encode(b"aes-256-gcm:pw").decode().rstrip("=")
@@ -53,13 +54,42 @@ links = [
     "vless://%s@r2.example.com:443?security=reality&pbk=jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0"
     "&sid=cd34&sni=www.microsoft.com#REALITY-NO-FP" % U,
     "vless://%s@g.example.com:443?security=tls&type=grpc&serviceName=mygrpc&sni=g.example.com#GRPC" % U,
+    "hysteria://auth@hy.example.com:8443?peer=cdn.example.com&upmbps=20&downmbps=100&obfs=mask#HY1",
     "hysteria2://hp@h2.example.com:8443?sni=h2.example.com&obfs=salamander&obfs-password=ob#HY2",
     "tuic://%s:tp@tuic.example.com:443?sni=tuic.example.com&congestion_control=bbr&alpn=h3#TUIC" % U,
     "anytls://ap@a.example.com:443?sni=a.example.com#ANYTLS",
+    "shadowtls://sp@st.example.com:443?version=3&sni=www.microsoft.com&fp=chrome#SHADOWTLS",
+    "ssh://user:password@ssh.example.com:22#SSH",
     "socks5://u:p@1.2.3.4:1080#SOCKS",
     "http://u:p@1.2.3.4:8080#HTTP",
 ]
 obs = [b.parse_link(x) for x in links]
+clash = b'''proxies:
+  - {name: CLASH-SS, type: ss, server: 3.3.3.3, port: 8388, cipher: aes-256-gcm, password: pw}
+  - name: CLASH-VMESS
+    type: vmess
+    server: cvm.example.com
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    cipher: auto
+    tls: true
+    servername: cvm.example.com
+    network: ws
+    ws-opts:
+      path: /ws
+      headers: {Host: cdn.example.com}
+  - name: CLASH-VLESS
+    type: vless
+    server: cvl.example.com
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    flow: xtls-rprx-vision
+    servername: www.microsoft.com
+    reality-opts: {public-key: jNXHt1yRo0vDuchQlIP6Z0ZvjT3KtzVI-T4E7RoLJS0, short-id: ab12}
+'''
+clash_obs, clash_errors = parse_subscription(clash)
+assert not clash_errors, clash_errors
+obs.extend(clash_obs)
 print("[*] 出站类型:", [o["type"] for o in obs])
 cfg = {"log": {"level": "error"},
        "inbounds": [{"type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 12345}],

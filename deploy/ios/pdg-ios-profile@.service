@@ -1,0 +1,22 @@
+[Unit]
+Description=PrivDNS Gateway iOS profile responder
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/pdg-bot/profile-http.py
+Environment=WWW_DIR=/opt/pdg-bot/ios-www
+EnvironmentFile=-/etc/privdns-gateway/ios-profile.env
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+DynamicUser=yes
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=

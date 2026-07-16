@@ -28,7 +28,7 @@ Modifier = Callable[[dict], None]
 
 PROXY_TYPES = (
     "shadowsocks", "vmess", "trojan", "vless", "hysteria", "hysteria2",
-    "tuic", "anytls", "shadowtls", "socks", "http",
+    "tuic", "anytls", "shadowtls", "ssh", "socks", "http",
 )
 SYSTEM_OUTBOUND_TAGS = {"gms-mtalk"}
 GROUP_TYPES = ("urltest", "selector")

@@ -45,13 +45,13 @@ pdg_latest_release_tag(){
 
 cmd_status(){
   c_g "== 服务 =="
-  for s in mosdns sing-box pdg-bot pdg-admin pdg-probe81; do
-    printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
+  for s in mosdns sing-box pdg-bot pdg-admin pdg-probe81 pdg-ios-profile.socket; do
+    printf "  %-24s %s\n" "$s" "$(systemctl is-active "$s" 2>/dev/null)"
   done
   echo "  timer        $(systemctl is-active pdg-rules-update.timer 2>/dev/null)"
   echo "  DoT 域名     $(cat /opt/pdg-bot/dot-domain 2>/dev/null || echo ?)"
   local ports
-  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8445|9090|9443)\b' | sed 's/^://' | sort -u | sed 's/^9090$/9090(local clash_api)/' | sed 's/^9443$/9443(admin HTTPS)/' | tr '\n' ' ')
+  ports=$(ss -lntu 2>/dev/null | grep -oE ':(53|80|81|443|853|8111|8445|9090|9443)\b' | sed 's/^://' | sort -u | sed 's/^8111$/8111(iOS profile)/' | sed 's/^9090$/9090(local clash_api)/' | sed 's/^9443$/9443(admin HTTPS)/' | tr '\n' ' ')
   echo "  监听端口     $ports"
   if [[ -d "$REPO_DIR/.git" ]]; then echo "  代码版本     $(git -C "$REPO_DIR" describe --tags --exclude '*migrate*' --always 2>/dev/null)"; fi
 }
@@ -368,6 +368,7 @@ migrate_fw_gms(){
 }
 
 migrate_rule_priority(){
+  [[ -e /etc/privdns-gateway/rule-order.custom ]] && return 0
   [[ -f /etc/sing-box/config.json && -f /opt/pdg-bot/pdg_service.py ]] || return 0
   local changed lock_path="/run/privdns-gateway.lock"
   # pdg update 已持有主锁；子进程改用临时锁，主锁仍会阻挡 Bot/PWA 并发写入。
@@ -409,6 +410,130 @@ migrate_fw_admin(){
   fi
 }
 
+# 老装迁移: 给内网客户端放行常驻 iOS 描述文件下载端口 8111/tcp。
+# 只追加到项目原装内网端口集, 自定义防火墙不自动改。
+# shellcheck disable=SC2120  # $1 仅测试注入
+migrate_fw_ios_profile(){
+  local f="${1:-/etc/nftables.conf}" bak
+  [[ -f "$f" ]] || return 0
+  grep -q 'table inet pdg' "$f" || return 0
+  grep -qE 'ip saddr [0-9./]+ tcp dport [{][^}]*8111' "$f" && return 0
+  if ! grep -qE 'ip saddr [0-9./]+ tcp dport [{][^}]*853[^}]*8445[^}]*[}] accept' "$f"; then
+    c_y "防火墙端口集非项目形态,未自动放行 iOS 描述文件端。请手动给内网卡段放行 8111/tcp。"
+    return 0
+  fi
+  bak="$f.preios.$(date +%s)"
+  if ! cp -a "$f" "$bak" 2>/dev/null || ! cmp -s "$f" "$bak"; then
+    c_y "iOS 描述文件防火墙迁移备份失败,中止。"; rm -f "$bak" 2>/dev/null; return 0
+  fi
+  sed -E -i 's#(ip saddr [0-9./]+ tcp dport [{][^}]*853)(,?)#\1, 8111\2#' "$f"
+  if ! grep -qE 'ip saddr [0-9./]+ tcp dport [{][^}]*8111' "$f" || ! nft -c -f "$f" >/dev/null 2>&1; then
+    c_y "iOS 描述文件防火墙规则校验失败,已还原。"; cp -a "$bak" "$f"; return 0
+  fi
+  if nft -f "$f" 2>/dev/null; then
+    c_g "  ✅ 已给内网卡段放行 iOS 描述文件 8111/tcp。"
+  else
+    cp -a "$bak" "$f"; c_y "iOS 描述文件防火墙加载失败,已还原。"
+  fi
+}
+
+# shellcheck disable=SC2120  # 默认路径参数用于测试注入，生产调用使用默认值
+ensure_ios_profile_access(){
+  local mosdns="${1:-/etc/mosdns/config.yaml}" envd="${2:-$ENVD}" cidr tmp
+  cidr=$(grep -oE 'ips:[[:space:]]*\[[[:space:]]*"[0-9./]+"' "$mosdns" 2>/dev/null \
+    | grep -oE '[0-9]+(\.[0-9]+){3}/[0-9]+' | head -1) || true
+  mkdir -p "$envd"
+  chmod 700 "$envd"
+  if [[ -z "$cidr" ]]; then
+    rm -f "$envd/ios-profile.env"
+    c_y "无法从 mosdns 识别 iOS 下载来源段，8111 应用层将拒绝全部访问。"
+    return 0
+  fi
+  tmp=$(mktemp "$envd/.ios-profile-env.XXXXXX")
+  ( umask 077; printf 'PDG_IOS_ALLOWED_CIDRS=%s\n' "$cidr" > "$tmp" )
+  mv -f "$tmp" "$envd/ios-profile.env"
+  chmod 600 "$envd/ios-profile.env"
+}
+
+write_ios_profile_allowlist(){
+  local www=/opt/pdg-bot/ios-www allowlist profile name tmp
+  allowlist="$www/.ios-profile-allowlist"
+  tmp=$(mktemp "$www/.ios-allowlist.XXXXXX")
+  {
+    printf '%s\n' 'ios-dot.mobileconfig'
+    for profile in "$www"/ios-*.mobileconfig; do
+      [[ -f "$profile" ]] || continue
+      name=${profile##*/}
+      [[ "$name" =~ ^ios-[0-9a-f]{12}\.mobileconfig$ ]] && printf '%s\n' "$name"
+    done
+  } | sort -u > "$tmp"
+  install -m644 "$tmp" "$allowlist"
+  rm -f "$tmp"
+}
+
+ensure_ios_profile(){
+  local tmpl=/opt/pdg-bot/pdg-dot.mobileconfig.tmpl host ip tmp
+  [[ -f "$tmpl" ]] || return 0
+  host=$(cat /opt/pdg-bot/dot-domain 2>/dev/null || true)
+  ip=$(grep -oE '"[0-9.]+/32"' /etc/sing-box/config.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
+  [[ -n "$host" && -n "$ip" ]] || return 0
+  install -d -m755 /opt/pdg-bot/ios-www
+  tmp=$(mktemp /opt/pdg-bot/ios-www/.ios-update.XXXXXX)
+  PROFILE_TEMPLATE="$tmpl" PROFILE_OUT="$tmp" PROFILE_DOMAIN="$host" PROFILE_IP="$ip" \
+    python3 - <<'PY'
+import os
+import uuid
+from pathlib import Path
+
+template = Path(os.environ["PROFILE_TEMPLATE"]).read_text(encoding="utf-8")
+rendered = (template.replace("__DOT_HOST__", os.environ["PROFILE_DOMAIN"])
+            .replace("__JP_IP__", os.environ["PROFILE_IP"])
+            .replace("__UUID1__", str(uuid.uuid4()).upper())
+            .replace("__UUID2__", str(uuid.uuid4()).upper()))
+Path(os.environ["PROFILE_OUT"]).write_text(rendered, encoding="utf-8")
+PY
+  install -m644 "$tmp" /opt/pdg-bot/ios-www/ios-dot.mobileconfig
+  rm -f "$tmp"
+  write_ios_profile_allowlist
+  printf 'http://%s:8111/ios-dot.mobileconfig\n' "$host" > /opt/pdg-bot/ios-www/ios-profile-url.txt
+  chmod 644 /opt/pdg-bot/ios-www/ios-profile-url.txt
+  printf '%s\n' '<!doctype html><meta charset="utf-8"><a href="/ios-dot.mobileconfig">下载 iOS DoT 描述文件</a>' \
+    > /opt/pdg-bot/ios-www/index.html
+  chmod 644 /opt/pdg-bot/ios-www/index.html
+}
+
+# shellcheck disable=SC2120
+ensure_ios_profile_runtime(){
+  # 参数 $1 用于测试注入临时 root；运行时从 admin unit 或 cmd_migrate_ios_profile 无参调用，默认作用于 /。
+  local root="${1:-}" src="$REPO_DIR/deploy/ios"
+  local bot_dir="$root/opt/pdg-bot" unit_dir="$root/etc/systemd/system"
+  [[ -f "$src/profile-http.py" && -f "$src/pdg-ios-profile.socket" \
+     && -f "$src/pdg-ios-profile@.service" && -f "$src/pdg-dot-ondemand.mobileconfig.tmpl" ]] \
+    || { c_y "仓库缺少 iOS 下载运行时文件。"; return 1; }
+  install -d -m755 "$bot_dir/ios-www" "$unit_dir" || return 1
+  install -m755 "$src/profile-http.py" "$bot_dir/profile-http.py" || return 1
+  install -m644 "$src/pdg-ios-profile.socket" "$unit_dir/pdg-ios-profile.socket" || return 1
+  install -m644 "$src/pdg-ios-profile@.service" "$unit_dir/pdg-ios-profile@.service" || return 1
+  install -m644 "$src/pdg-dot-ondemand.mobileconfig.tmpl" "$bot_dir/pdg-dot.mobileconfig.tmpl" || return 1
+  ensure_ios_profile || return 1
+  ensure_ios_profile_access "$root/etc/mosdns/config.yaml" "$root/etc/privdns-gateway" || return 1
+  migrate_fw_ios_profile "$root/etc/nftables.conf" || return 1
+  if [[ ! -s "$bot_dir/ios-www/ios-dot.mobileconfig" \
+     || ! -s "$bot_dir/ios-www/.ios-profile-allowlist" \
+     || ! -s "$root/etc/privdns-gateway/ios-profile.env" ]]; then
+    c_y "iOS 下载运行时生成不完整。"
+    return 1
+  fi
+  systemctl daemon-reload || return 1
+  systemctl enable --now pdg-ios-profile.socket >/dev/null 2>&1 || return 1
+}
+
+cmd_migrate_ios_profile(){
+  need_root migrate-ios-profile
+  ensure_ios_profile_runtime || return 1
+  c_g "✅ iOS 下载运行时已就绪。"
+}
+
 ensure_admin_token(){
   install -d -m700 /etc/privdns-gateway
   if [[ ! -s /etc/privdns-gateway/admin.token ]]; then
@@ -426,7 +551,8 @@ cmd_snapshot(){
   # 整机配置 + 防火墙 + bot.env(含 token)+ service(相对 / 打包, 回滚直接 -C / 解开)
   tar czf "$d/snap.tar.gz" -C / \
     etc/mosdns etc/sing-box opt/pdg-bot opt/pdg-admin etc/privdns-gateway \
-    etc/nftables.conf etc/systemd/system/pdg-bot.service etc/systemd/system/pdg-admin.service 2>/dev/null
+    etc/nftables.conf etc/systemd/system/pdg-bot.service etc/systemd/system/pdg-admin.service \
+    etc/systemd/system/pdg-ios-profile.socket etc/systemd/system/pdg-ios-profile@.service 2>/dev/null
   chmod 600 "$d/snap.tar.gz"
   echo "✅ 快照: $d/snap.tar.gz"
   ls -1dt "$SNAP_DIR"/*/ 2>/dev/null | tail -n +11 | xargs -r rm -rf   # 只留最近 10 份
@@ -457,6 +583,7 @@ cmd_rollback(){
   systemctl daemon-reload
   nft -f /etc/nftables.conf 2>/dev/null || true
   systemctl restart mosdns sing-box pdg-bot pdg-admin pdg-probe81 2>/dev/null || true
+  systemctl restart pdg-ios-profile.socket 2>/dev/null || true
   echo "✅ 已回滚并重启服务"
 }
 
@@ -502,9 +629,14 @@ cmd_update(){
   install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
   install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
+  install -m755 "$REPO_DIR"/deploy/ios/profile-http.py       /opt/pdg-bot/
+  install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile.socket /etc/systemd/system/ 2>/dev/null || true
+  install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile@.service /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.service  /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/bot/pdg-health.timer    /etc/systemd/system/ 2>/dev/null || true
   install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
+  install -d -m755 /opt/pdg-bot/ios-www
+  ensure_ios_profile       # 老装: 补齐常驻 iOS 描述文件下载文件
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh   /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh /usr/local/bin/
   install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh     /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
@@ -515,6 +647,8 @@ cmd_update(){
   migrate_singbox_gms       # 老装: sing-box 补 GMS 推送入站和 mtalk 路由
   migrate_fw_gms            # 老装: 防火墙内网放行集补 5228-5230
   migrate_fw_admin          # 老装: 防火墙内网放行管理端 9443
+  migrate_fw_ios_profile    # 老装: 防火墙内网放行 iOS 描述文件 8111
+  ensure_ios_profile_access # iOS 下载应用层来源白名单与防火墙保持一致
   migrate_rule_priority     # 老装: 用户手动域名规则优先于规则集
   ensure_admin_token
 
@@ -530,8 +664,9 @@ cmd_update(){
     c_y "nftables 配置 check 失败, 回滚…"; cmd_rollback 0; return 1
   fi
   systemctl daemon-reload
-  systemctl enable --now pdg-health.timer pdg-admin >/dev/null 2>&1 || true
+  systemctl enable --now pdg-health.timer pdg-admin pdg-ios-profile.socket >/dev/null 2>&1 || true
   systemctl restart pdg-bot pdg-admin pdg-probe81 2>/dev/null || true
+  systemctl restart pdg-ios-profile.socket 2>/dev/null || true
   sleep 2
 
   # token 是否已配置(未配则 pdg-bot 不在跑属正常, 不据此回滚)
@@ -586,7 +721,7 @@ cmd_admin(){
   echo "管理端(仅内网卡可达): https://${host}:9443/#token=${token}"
 }
 
-cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-admin pdg-probe81 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-admin / pdg-probe81"; }
+cmd_restart(){ need_root restart; systemctl restart mosdns sing-box pdg-bot pdg-admin pdg-probe81 2>/dev/null; systemctl restart pdg-ios-profile.socket 2>/dev/null; echo "已重启 mosdns / sing-box / pdg-bot / pdg-admin / pdg-probe81 / pdg-ios-profile"; }
 
 cmd_log(){ journalctl -u pdg-bot -u pdg-admin -u mosdns -u sing-box -n "${1:-40}" --no-pager -o cat; }
 
@@ -614,6 +749,7 @@ cmd_detect_cidr(){
   sed -i -E "s#(ips:[[:space:]]*\[[[:space:]]*\")[0-9./]+(\")#\1$det\2#" /etc/mosdns/config.yaml
   if ! nft -c -f /etc/nftables.conf >/dev/null 2>&1; then c_y "nft 校验失败, 回滚…"; cmd_rollback 0; return 1; fi
   nft -f /etc/nftables.conf
+  ensure_ios_profile_access
   systemctl restart mosdns; sleep 2
   [[ "$(systemctl is-active mosdns)" == active ]] || { c_y "mosdns 重启异常, 回滚…"; cmd_rollback 0; return 1; }
   c_g "✅ 内网卡段已更新为 $det 并重启 mosdns。"
@@ -621,43 +757,18 @@ cmd_detect_cidr(){
 
 cmd_ios(){
   need_root ios
-  local TMPL=/opt/pdg-bot/pdg-dot.mobileconfig.tmpl
-  [[ -f "$TMPL" ]] || { echo "缺少 $TMPL, 先装好 PrivDNS Gateway"; return 1; }
+  local WWW=/opt/pdg-bot/ios-www URL
+  [[ -f "$WWW/ios-dot.mobileconfig" ]] || { echo "缺少 iOS 描述文件, 请先运行 install.sh 或 sudo pdg update"; return 1; }
+  URL=$(cat "$WWW/ios-profile-url.txt" 2>/dev/null || true)
+  [[ -n "$URL" ]] || { echo "缺少 iOS 下载地址文件: $WWW/ios-profile-url.txt"; return 1; }
   command -v qrencode >/dev/null || { c_g "装 qrencode…"; apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq qrencode; }
-  # 取 DoT 主机名(证书 CN)/ 公网 IP / 内网卡段
-  local CERT=/etc/mosdns/certs/fullchain.pem; [[ -f /etc/dnsdist/certs/fullchain.pem ]] && CERT=/etc/dnsdist/certs/fullchain.pem
-  local HOST IP CIDR
-  HOST=$(openssl x509 -in "$CERT" -noout -subject 2>/dev/null | grep -oE 'CN *= *[A-Za-z0-9.*-]+' | sed 's/.*= *//')
-  IP=$(grep -oE '"[0-9.]+/32"' /etc/sing-box/config.json 2>/dev/null | tr -d '"' | grep -v '^127' | head -1 | cut -d/ -f1)
-  [[ -n "$IP" ]] || IP=$(curl -fsSL --max-time 6 https://api.ipify.org)
-  CIDR=$(grep -oE 'ip saddr [0-9./]+' /etc/nftables.conf 2>/dev/null | head -1 | awk '{print $3}')
-  [[ -n "$HOST" && -n "$IP" && -n "$CIDR" ]] || { echo "信息不全 (HOST=$HOST IP=$IP CIDR=$CIDR)"; return 1; }
-
-  local PORT=8443 TOK U1 U2 WWW URL
-  TOK=$(openssl rand -hex 6)
-  U1=$(cat /proc/sys/kernel/random/uuid | tr a-z A-Z); U2=$(cat /proc/sys/kernel/random/uuid | tr a-z A-Z)
-  WWW=$(mktemp -d)
-  sed -e "s/__DOT_HOST__/$HOST/g" -e "s/__JP_IP__/$IP/g" -e "s/__UUID1__/$U1/g" -e "s/__UUID2__/$U2/g" \
-      "$TMPL" > "$WWW/$TOK.mobileconfig"
-  URL="http://$IP:$PORT/$TOK.mobileconfig"
-
-  local SRV=""
-  trap 'kill "$SRV" 2>/dev/null; nft -f /etc/nftables.conf 2>/dev/null; rm -rf "$WWW"; trap - INT TERM' INT TERM
-  nft insert rule inet pdg input ip saddr "$CIDR" tcp dport "$PORT" accept 2>/dev/null
-  ( cd "$WWW" && timeout 600 python3 -m http.server "$PORT" --bind 0.0.0.0 >/dev/null 2>&1 ) &
-  SRV=$!
-  qrencode -o /opt/pdg-bot/ios-qr.png "$URL" 2>/dev/null || true
+  qrencode -o /opt/pdg-bot/ios-qr.png "$URL"
   echo
   c_g "用手机(走【内网卡/蜂窝】, 关 WiFi)扫下面二维码 → Safari 打开 → 安装描述文件:"
   echo; qrencode -t ANSIUTF8 "$URL"; echo
   echo "  链接: $URL"
-  echo "  DoT:  $HOST   (PNG 已存 /opt/pdg-bot/ios-qr.png)"
-  c_y "装好后按回车收尾(10 分钟自动收)…"
-  read -t 600 -r _ || true
-  kill "$SRV" 2>/dev/null
-  nft -f /etc/nftables.conf 2>/dev/null   # 撤掉临时放行
-  rm -rf "$WWW"
-  echo "已关闭临时下载服务。"
+  echo "  描述文件: $WWW/ios-dot.mobileconfig   (PNG 已存 /opt/pdg-bot/ios-qr.png)"
+  echo "  下载服务: pdg-ios-profile.socket (常驻 8111, 仅内网卡来源)"
 }
 
 cmd_uninstall(){
@@ -717,7 +828,8 @@ if [[ $EUID -eq 0 ]]; then
   case "${1:-menu}" in
     status|st|doctor|dr|log|logs|traffic|tr|report|uninstall|rm) : ;;   # 只读/卸载: 不迁移
     *) migrate_firewall_to_pdg || true; migrate_mosdns_concurrent || true; migrate_mosdns_unlock || true
-       migrate_singbox_gms || true; migrate_fw_gms || true; migrate_fw_admin || true; migrate_rule_priority || true ;;   # 管理类命令才迁移
+       migrate_singbox_gms || true; migrate_fw_gms || true; migrate_fw_admin || true; migrate_fw_ios_profile || true
+       ensure_ios_profile_access || true; migrate_rule_priority || true ;;   # 管理类命令才迁移
   esac
 fi
 
@@ -727,6 +839,7 @@ case "${1:-menu}" in
   doctor|dr)     shift || true; cmd_doctor "${1:-}";;
   update|up)     shift || true; cmd_update "${1:-}";;
   migrate-fw)    need_root migrate-fw; migrate_firewall_to_pdg;;
+  migrate-ios-profile) cmd_migrate_ios_profile;;
   snapshot|snap) cmd_snapshot;;
   rollback)      shift || true; cmd_rollback "${1:-0}";;
   token)         cmd_token;;
@@ -738,5 +851,5 @@ case "${1:-menu}" in
   report)        shift || true; cmd_report "$@";;
   detect-cidr|cidr) shift || true; cmd_detect_cidr "${1:-}";;
   uninstall|rm)  shift || true; cmd_uninstall "${1:-}";;
-  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|admin [--rotate]|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|migrate-fw|uninstall [--purge]]";;
+  *) echo "用法: pdg [menu|status|doctor [--json|--deep]|update [--dry-run]|snapshot|rollback [n]|token|admin [--rotate]|restart|log [n]|traffic|ios|report [--redact-ip|--full]|detect-cidr|migrate-fw|migrate-ios-profile|uninstall [--purge]]";;
 esac

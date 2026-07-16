@@ -66,13 +66,13 @@ sudo ./install.sh
 1. 手机【私密 DNS / DoT】填你的域名(如 `dot.example.com`)。
 2. Telegram 给 bot 发 `/start`:
    - **📤 出口管理 → 添加**:直接粘贴节点链接。
-     > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria2:// / tuic:// / anytls:// / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
-     > sing-box 还支持 **shadowtls / ssh / hysteria(v1)/ wireguard(endpoint)** 等——这些手写 `/etc/sing-box/config.json`,或开 issue 让 bot 加解析。
+     > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria:// / hysteria2:// / tuic:// / anytls:// / shadowtls:// / ssh://(密码认证) / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
+     > WireGuard endpoint 等没有统一分享格式的出站仍需手写 `/etc/sing-box/config.json`。
    - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
    - **🔀 策略组**:多个节点默认自动优选，也可固定指定节点；可作为默认策略或分流目标。
-3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。PWA 集成节点订阅与结构化覆写、分类组自动/固定节点、三目标测速、分流与远程规则集、连接和日志、Geosite/项目在线更新。节点订阅支持 Base64/纯 URI 列表和 SIP008，可预览差异并每日自动刷新。管理端要求独立令牌，不是只靠来源 IP。
-4. iOS:bot **📱 客户端 → iOS 描述文件**;**不用 bot 的话** `sudo pdg ios` 会直接在终端打出二维码,手机(走内网卡)扫码 → Safari → 装。
-   Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(已有自定义路由的普通 Wi-Fi 自动直连、互不干扰);
+3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。PWA 集成节点订阅与结构化覆写、分类组自动/固定节点、三目标测速、批量域名/CIDR 分流、规则排序与远程规则集、连接和日志、Geosite/项目在线更新。节点订阅支持 Clash YAML、Base64/纯 URI 列表和 SIP008，可预览差异并每日自动刷新。管理端要求独立令牌，不是只靠来源 IP。
+4. iOS:安装结束时终端会直接输出二维码；Bot **📱 客户端 → iOS 二维码/文件** 会发送二维码和 `.mobileconfig` 文件；**不用 bot 的话** `sudo pdg ios` 也可随时显示二维码。二维码指向常驻 `http://你的DoT域名:8111/ios-dot.mobileconfig`，手机走内网卡扫码 → Safari → 安装。
+   Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(已有自定义路由的普通 Wi-Fi 自动直连、互不干扰); `8111` 只对内网卡来源放行;
    bot 生成时还可指定「强制直连」的 Wi-Fi 名单(SSID,治 captive portal 误判)。
 5. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
 

@@ -6,6 +6,7 @@ import os, re, json, ipaddress, subprocess, urllib.request
 SB = "/etc/sing-box/config.json"
 MOSDNS_CONF = "/etc/mosdns/config.yaml"
 DOT_DOMAIN_FILE = "/opt/pdg-bot/dot-domain"
+IOS_PROFILE_ENV = "/etc/privdns-gateway/ios-profile.env"
 
 def _run(cmd, t=10):
     try:
@@ -55,10 +56,10 @@ def _dot_file():
         return ""
 
 def check_services():
-    bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-admin", "pdg-probe81")
+    bad = [s for s in ("mosdns", "sing-box", "pdg-bot", "pdg-admin", "pdg-probe81", "pdg-ios-profile.socket")
            if _run(["systemctl", "is-active", s])[1].strip() != "active"]
     return ("fail", "服务", "未运行: " + ", ".join(bad)) if bad \
-        else ("ok", "服务", "mosdns/sing-box/pdg-bot/pdg-admin/pdg-probe81 都在")
+        else ("ok", "服务", "mosdns/sing-box/pdg-bot/pdg-admin/pdg-probe81/pdg-ios-profile 都在")
 
 def check_singbox_version():
     _, out, _ = _run(["sing-box", "version"])
@@ -111,6 +112,25 @@ def check_internal_cidr():
         return ("warn", "内网卡段", f"{c} 偏宽(/{net.prefixlen}), 建议收到内网卡精确 /16")
     return ("ok", "内网卡段", c)
 
+def check_ios_profile_access():
+    expected = _internal_cidr()
+    try:
+        raw = open(IOS_PROFILE_ENV, encoding="ascii").read()
+    except OSError:
+        return ("fail", "iOS 下载白名单", "缺少 ios-profile.env，8111 应用层会拒绝访问")
+    match = re.search(r"^PDG_IOS_ALLOWED_CIDRS=(\S+)\s*$", raw, re.MULTILINE)
+    if not match:
+        return ("fail", "iOS 下载白名单", "PDG_IOS_ALLOWED_CIDRS 未配置")
+    try:
+        configured = ipaddress.ip_network(match.group(1), strict=False)
+        wanted = ipaddress.ip_network(expected, strict=False)
+    except ValueError:
+        return ("fail", "iOS 下载白名单", "CIDR 配置无效")
+    if configured != wanted:
+        return ("fail", "iOS 下载白名单", f"{configured} 与内网卡段 {wanted} 不一致")
+    return ("ok", "iOS 下载白名单", str(configured))
+
+
 def check_nft():
     # 兼容两种表名: 新版独立表 inet pdg; 旧装(尚未迁移)仍是 inet filter。
     _, out, _ = _run(["nft", "list", "chain", "inet", "pdg", "input"])
@@ -125,7 +145,7 @@ def check_nft():
             continue  # 限定来源的行 / 非 accept 行, 跳过
         m = re.search(r"dport\s*\{?\s*([0-9,\-\s]+)", s)   # 端口集可含区间(如 5228-5230)
         if m:
-            sens = {"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445", "9443"}
+            sens = {"53", "80", "81", "443", "853", "8111", "5228", "5229", "5230", "8445", "9443"}
             for tok in m.group(1).split(","):
                 tok = tok.strip()
                 if tok.isdigit() and tok in sens:
@@ -135,7 +155,7 @@ def check_nft():
                     leaked |= {p for p in sens if a <= int(p) <= b}
     if leaked:
         return ("fail", "防火墙", "这些口对全网开放(应只限内网卡): " + ", ".join(sorted(leaked)))
-    return ("ok", "防火墙", "53/80/81/443/853/5228-5230/8445/9443 仅限内网卡来源")
+    return ("ok", "防火墙", "53/80/81/443/853/8111/5228-5230/8445/9443 仅限内网卡来源")
 
 def check_gms():
     """GMS/FCM 推送端口(5228-5230)是否完整且路由正确。只读、不触发迁移: 老装第一次 pdg update
@@ -342,7 +362,8 @@ def check_deep_upstreams():
     return (level, "DNS 上游探测", " ; ".join(parts))
 
 ALL = [check_services, check_singbox_version, check_dot_arecord, check_dot_domain_sync,
-       check_internal_cidr, check_nft, check_gms, check_cert, check_dns, check_singbox_config]
+       check_internal_cidr, check_ios_profile_access, check_nft, check_gms, check_cert, check_dns,
+       check_singbox_config]
 ALERT = [check_services, check_dns, check_cert]  # healthcheck 用的轻量子集(运行期故障)
 DEEP = [check_deep_dot_handshake, check_deep_probe81, check_deep_dns_cn,
         check_deep_clash, check_deep_upstreams, check_deep_hijack_note]  # pdg doctor --deep 追加

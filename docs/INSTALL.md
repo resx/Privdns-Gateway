@@ -47,7 +47,7 @@ sudo ./install.sh
 
 ## 3. 装完
 
-见 [README](../README.md#装完之后):手机设私密 DNS、bot 加出口/分流、打开内网管理面板、iOS 下发描述文件。
+见 [README](../README.md#装完之后):手机设私密 DNS、bot 加出口/分流、打开内网管理面板。安装结束时终端会输出 iOS 二维码；Bot 也可发送二维码和 `.mobileconfig` 文件。
 
 > 从原项目 `v1.1.16` 或其他旧版本迁移时，请先阅读 [原项目迁移指南](MIGRATION-FROM-ORIGINAL.md)。已有安装不要直接运行普通 `install.sh` 覆盖。
 
@@ -67,7 +67,7 @@ sudo ./install.sh
 | 管理面板打不开 | 手机是否走内网卡?云安全组是否放行内网段到 9443?`systemctl status pdg-admin` |
 | 面板提示令牌无效 | 重新从 bot 打开,或运行 `sudo pdg admin`;不要手工修改 `admin.token` |
 
-日志:`journalctl -u mosdns -u sing-box -u pdg-bot -u pdg-admin -n 50`。
+日志:`journalctl -u mosdns -u sing-box -u pdg-bot -u pdg-admin -u pdg-ios-profile@*.service -n 50`。
 
 ## 非交互 / 自动化安装
 
@@ -106,8 +106,8 @@ sudo PDG_NONINTERACTIVE=1 \
 | 81 | tcp | 仅内网卡段 | iOS OnDemand 探测端点 |
 | 5228-5230 | tcp | 仅内网卡段 | GMS/FCM 推送(mtalk.google.com 原生端口,经 sing-box 专用入口路由) |
 | 9090 | tcp | 仅 127.0.0.1 | sing-box clash_api(bot/API 用,不对外) |
+| 8111 | tcp | 仅内网卡段 | iOS 描述文件常驻下载端点 |
 | 9443 | tcp | 仅内网卡段 | HTTPS PWA 管理端(另有 Bearer 令牌认证) |
-| 8443 | tcp | 临时·仅内网卡 | `pdg ios` 下发描述文件时短开,用完自动关 |
 
 ⚠️ **证书签发/续期需要从公网访问 80 端口**(Let's Encrypt HTTP-01 校验):签发时 pre-hook 会把 80 临时对全网开放(并停 sing-box),完后还原。
 所以**云安全组必须允许入站 80**,否则证书续期会失败。

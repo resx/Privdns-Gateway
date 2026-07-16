@@ -59,9 +59,10 @@ with tempfile.TemporaryDirectory() as directory:
 
     runner = Runner()
     control = SingBoxControl(str(config_path), str(root / "pdg.lock"), runner=runner, sleeper=lambda _: None)
+    rule_order_marker = root / "rule-order.custom"
     service = GatewayService(
         control, str(direct_path), str(meta_path), ruleset_dir=str(root / "rs"),
-        subscription_meta_path=str(subscription_path),
+        subscription_meta_path=str(subscription_path), rule_order_marker_path=str(rule_order_marker),
     )
 
     overview = service.overview()
@@ -80,6 +81,8 @@ with tempfile.TemporaryDirectory() as directory:
         "server_port": 1080, "tls": False, "replacing": False,
     }
     service.add_exit("socks5://u:p@node.example.com:1080#new")
+    service.add_exit("ssh://alice:secret@ssh.example.com:22#ssh-node")
+    assert any(item["tag"] == "ssh-node" and item["type"] == "ssh" for item in service.list_exits())
     service.add_exit("socks5://u:p@manual.example.com:1080#raw", "手动 香港")
     assert any(item["tag"] == "手动-香港" and item["name_source"] == "手动" for item in service.list_exits())
     service.save_group("手动节点组", ["new", "手动-香港"])
@@ -120,6 +123,14 @@ with tempfile.TemporaryDirectory() as directory:
     subscription_data = base64.urlsafe_b64encode(subscription_text.encode()).rstrip(b"=")
     encoded_title = base64.urlsafe_b64encode("🇭🇰 港台专线".encode()).decode().rstrip("=")
     assert service._subscription_title({"profile-title": f"base64:{encoded_title}"}) == "🇭🇰 港台专线"
+    clash_data = b'''proxies:
+  - {name: Clash-HK, type: ss, server: clash.example.com, port: 8388, cipher: aes-256-gcm, password: secret}
+  - {name: Clash-Skip, type: wireguard, server: 9.9.9.9, port: 51820}
+'''
+    service._fetch_subscription = lambda url: (clash_data, "Clash Airport")
+    clash_preview = service.preview_subscription("https://subscribe.example/clash")
+    assert clash_preview["count"] == 1 and clash_preview["skipped"] == 1
+    assert clash_preview["nodes"][0]["type"] == "shadowsocks"
     service._fetch_subscription = lambda url: (subscription_data, "🇭🇰 港台专线")
     try:
         service.preview_subscription("http://127.0.0.1/nodes")
@@ -297,14 +308,28 @@ with tempfile.TemporaryDirectory() as directory:
     assert current["route"]["rules"][0].get("inbound")
     assert current["route"]["rules"][1].get("action") == "reject"
     assert current["route"]["rules"][2] == {
-        "domain_suffix": ["existing.example", "video.example"], "outbound": "new",
+        "domain_suffix": ["existing.example"], "outbound": "new",
     }
-    assert current["route"]["rules"][3].get("rule_set") == "rs_media"
+    assert current["route"]["rules"][3] == {
+        "domain_suffix": ["video.example"], "outbound": "new",
+    }
+    assert current["route"]["rules"][4].get("rule_set") == "rs_media"
     service.set_rule("video.example", "jp")
     rules = service.list_rules()
     hits = [item for item in rules if item["value"] == "video.example"]
     assert len(hits) == 1 and hits[0]["target"] == "jp"
     assert all(isinstance(item["order"], int) for item in rules)
+
+    batch = service.set_rules(["one.example", "two.example", "one.example"], "new")
+    assert batch["count"] == 2
+    cidr_batch = service.set_cidrs(["10.1.2.3/8", "2001:db8::1/32"], "new")
+    assert cidr_batch["count"] == 2
+    listed_rules = service.list_rules()
+    assert any(item["kind"] == "cidr" and item["value"] == "10.0.0.0/8" for item in listed_rules)
+    assert service.test_route("10.20.30.40") == {
+        "domain": "10.20.30.40", "target": "new", "kind": "cidr", "match": "10.0.0.0/8",
+    }
+    assert service.remove_cidr("2001:db8::1234/32")["deleted"] == "2001:db8::/32"
 
     service.set_rule("local.example", "direct")
     assert "local.example" in direct_path.read_text(encoding="utf-8")
@@ -336,6 +361,27 @@ with tempfile.TemporaryDirectory() as directory:
     assert updated["target"] == "jp" and updated["label"] == "视频"
     refreshed = service.refresh_ruleset(ruleset["tag"])
     assert refreshed["count"] == 2
+
+    # 用户自定义顺序允许规则集排到手工规则前，刷新规则集和旧迁移都不得覆盖。
+    managed = [item for item in service.list_rules() if item["kind"] != "direct"]
+    selected_ruleset = next(item for item in managed if item["kind"] == "ruleset" and item["value"] == ruleset["tag"])
+    custom_order = [selected_ruleset] + [item for item in managed if item is not selected_ruleset]
+    original_apply = service.control.apply
+    service.control.apply = lambda modify: (False, "模拟重排失败")
+    try:
+        service.reorder_rules([{"kind": item["kind"], "value": item["value"]} for item in custom_order])
+        raise AssertionError("failed reorder should fail")
+    except ServiceError as error:
+        assert "模拟重排失败" in str(error)
+    finally:
+        service.control.apply = original_apply
+    assert not rule_order_marker.exists()
+    result = service.reorder_rules([{"kind": item["kind"], "value": item["value"]} for item in custom_order])
+    assert result["order"][0] == {"kind": "ruleset", "value": ruleset["tag"]}
+    assert rule_order_marker.is_file() and service.migrate_rule_priority() == {"changed": False}
+    service.refresh_ruleset(ruleset["tag"])
+    reordered = [item for item in service.list_rules() if item["kind"] != "direct"]
+    assert (reordered[0]["kind"], reordered[0]["value"]) == ("ruleset", ruleset["tag"])
 
     service._clash_request = lambda path, method="GET": ({
         "connections": [{

@@ -33,7 +33,11 @@ class FakeService:
     def set_group_selection(self, tag, selected): self.calls.append(("group-selection", tag, selected)); return {"tag": tag, "selected": selected}
     def list_rules(self): return [{"kind": "domain", "value": "x.test", "target": "jp"}]
     def set_rule(self, domain, target): self.calls.append(("rule", domain, target)); return {"domain": domain}
+    def set_rules(self, domains, target): self.calls.append(("rules", domains, target)); return {"count": len(domains)}
+    def set_cidrs(self, cidrs, target): self.calls.append(("cidrs", cidrs, target)); return {"count": len(cidrs)}
+    def reorder_rules(self, order): self.calls.append(("rule-order", order)); return {"order": order}
     def remove_rule(self, domain): self.calls.append(("del-rule", domain)); return {"deleted": domain}
+    def remove_cidr(self, cidr): self.calls.append(("del-cidr", cidr)); return {"deleted": cidr}
     def test_route(self, domain): self.calls.append(("test-route", domain)); return {"target": "jp"}
     def list_subscriptions(self): return [{"id": "sub_one", "label": "机场 A", "count": 2}]
     def preview_subscription(self, url, label, include, exclude, group, categories=None, overrides=None):
@@ -117,6 +121,17 @@ with tempfile.TemporaryDirectory() as directory:
 
         status, _, payload = request(port, "POST", "/api/v1/rules", token, {"domain": "x.test", "target": "jp"})
         assert status == 200 and service.calls[-1] == ("rule", "x.test", "jp")
+        status, _, _ = request(port, "POST", "/api/v1/rules/batch", token,
+                               {"kind": "domain", "values": ["a.test", "b.test"], "target": "jp"})
+        assert status == 200 and service.calls[-1] == ("rules", ["a.test", "b.test"], "jp")
+        status, _, _ = request(port, "POST", "/api/v1/rules/batch", token,
+                               {"kind": "cidr", "values": ["10.0.0.0/8"], "target": "jp"})
+        assert status == 200 and service.calls[-1] == ("cidrs", ["10.0.0.0/8"], "jp")
+        order = [{"kind": "domain", "value": "a.test"}, {"kind": "cidr", "value": "10.0.0.0/8"}]
+        status, _, _ = request(port, "PUT", "/api/v1/rules/order", token, {"order": order})
+        assert status == 200 and service.calls[-1] == ("rule-order", order)
+        status, _, _ = request(port, "DELETE", "/api/v1/cidrs/10.0.0.0%2F8", token)
+        assert status == 200 and service.calls[-1] == ("del-cidr", "10.0.0.0/8")
         status, _, _ = request(port, "POST", "/api/v1/groups", token, {"name": "auto", "members": ["hk", "tw"]})
         assert status == 200 and service.calls[-1] == ("group", "auto", ["hk", "tw"])
         status, _, _ = request(port, "PUT", "/api/v1/groups/auto/selection", token, {"selected": "hk"})

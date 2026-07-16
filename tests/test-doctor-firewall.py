@@ -6,10 +6,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 checks_src = (ROOT / "deploy/bot/checks.py").read_text(encoding="utf-8")
 
-assert '{"53", "80", "81", "443", "853", "5228", "5229", "5230", "8445", "9443"}' in checks_src, (
+assert '{"53", "80", "81", "443", "853", "8111", "5228", "5229", "5230", "8445", "9443"}' in checks_src, (
     "doctor firewall leak detection must include admin 9443, TG 8445 and GMS 5228-5230"
 )
-assert "53/80/81/443/853/5228-5230/8445/9443" in checks_src, (
+assert "53/80/81/443/853/8111/5228-5230/8445/9443" in checks_src, (
     "doctor firewall OK text should mention admin, TG and GMS ports"
 )
 
@@ -33,7 +33,7 @@ assert st == "ok", (st, msg)
 checks._run = lambda cmd: (0, "chain input {\n tcp dport { 1-65535 } accept\n}", "")
 st, _, msg = checks.check_nft()
 assert st == "fail", (st, msg)
-for p in ("53", "443", "5228", "5230", "8445", "9443"):
+for p in ("53", "443", "8111", "5228", "5230", "8445", "9443"):
     assert p in msg, (p, msg)
 
 # 宽区间但限定内网来源: 不算泄露
@@ -83,5 +83,29 @@ assert st == "warn", (st, msg)
 
 st, _, msg = gms_case([443, 80], NFT_NO_GMS)                    # 双缺也只 warn, 不 fail
 assert st == "warn", (st, msg)
+
+# iOS 下载应用层来源必须与 mosdns 内网策略精确一致，缺失或放宽都 fail。
+with tempfile.TemporaryDirectory() as work:
+    root = Path(work)
+    checks.MOSDNS_CONF = str(root / "mosdns.yaml")
+    checks.IOS_PROFILE_ENV = str(root / "ios-profile.env")
+    Path(checks.MOSDNS_CONF).write_text(
+        'args: { ips: ["172.22.0.0/16"] }\n', encoding="utf-8"
+    )
+    Path(checks.IOS_PROFILE_ENV).write_text(
+        "PDG_IOS_ALLOWED_CIDRS=172.22.0.0/16\n", encoding="ascii"
+    )
+    st, _, msg = checks.check_ios_profile_access()
+    assert st == "ok", (st, msg)
+
+    Path(checks.IOS_PROFILE_ENV).write_text(
+        "PDG_IOS_ALLOWED_CIDRS=0.0.0.0/0\n", encoding="ascii"
+    )
+    st, _, msg = checks.check_ios_profile_access()
+    assert st == "fail" and "不一致" in msg, (st, msg)
+
+    Path(checks.IOS_PROFILE_ENV).unlink()
+    st, _, msg = checks.check_ios_profile_access()
+    assert st == "fail" and "缺少" in msg, (st, msg)
 
 print("doctor-firewall regression OK")

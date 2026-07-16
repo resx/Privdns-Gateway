@@ -58,6 +58,14 @@ check("节点名 + 还原空格", m.parse_link("ss://%s@5.6.7.8:8388#Hong+Kong+0
 check("节点名编码加号保留", m.parse_link(f"ss://{ui}@5.6.7.8:8388#Premium%2BNode"),
       type="shadowsocks", tag="Premium+Node")
 
+# hysteria v1
+check("hysteria://",
+      m.parse_link("hysteria://token@hy.example.com:8443?peer=cdn.example.com&insecure=1&"
+                   "upmbps=20&downmbps=100&obfs=mask&alpn=h3#HY1"),
+      type="hysteria", server="hy.example.com", server_port=8443, auth_str="token",
+      up_mbps=20, down_mbps=100, obfs="mask", tls__server_name="cdn.example.com",
+      tls__insecure=True, tls__alpn=["h3"])
+
 # hysteria2
 check("hysteria2://",
       m.parse_link("hysteria2://mypass@h2.example.com:8443?sni=h2.example.com&insecure=1&"
@@ -96,6 +104,16 @@ check("vless:// grpc serviceName",
 check("anytls://", m.parse_link("anytls://atpass@a.example.com:443?sni=a.example.com#ANYTLS"),
       type="anytls", server="a.example.com", server_port=443, password="atpass", tls__server_name="a.example.com")
 
+# shadowtls v3
+check("shadowtls://",
+      m.parse_link("shadowtls://secret@st.example.com:443?version=3&sni=www.microsoft.com&fp=chrome#ST"),
+      type="shadowtls", server="st.example.com", server_port=443, version=3, password="secret",
+      tls__server_name="www.microsoft.com", tls__utls__enabled=True, tls__utls__fingerprint="chrome")
+
+# ssh 密码认证
+check("ssh://", m.parse_link("ssh://alice:p%40ss@ssh.example.com:2222#SSH"),
+      type="ssh", server="ssh.example.com", server_port=2222, user="alice", password="p@ss")
+
 # socks5
 check("socks5://", m.parse_link("socks5://user:pass@1.2.3.4:1080#SOCKS"),
       type="socks", server="1.2.3.4", server_port=1080, version="5", username="user", password="pass")
@@ -120,7 +138,65 @@ sip_nodes, _ = parse_subscription(json.dumps({"servers": [{
 }]}).encode())
 check("SIP008 节点订阅", sip_nodes[0], type="shadowsocks", server="sip.example", tag="SIP")
 
+# Clash YAML：块映射、嵌套 WS/Reality、流式映射和不支持节点隔离
+clash_yaml = b'''mixed-port: 7890
+proxies:
+  - name: "HK SS"
+    type: ss
+    server: 1.2.3.4
+    port: 8388
+    cipher: aes-256-gcm
+    password: "p#ss"
+  - name: VM WS
+    type: vmess
+    server: vm.example.com
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    alterId: 0
+    cipher: auto
+    tls: true
+    servername: vm.example.com
+    network: ws
+    ws-opts:
+      path: /websocket
+      headers:
+        Host: cdn.example.com
+  - name: VLESS Reality
+    type: vless
+    server: reality.example.com
+    port: 443
+    uuid: 11111111-2222-3333-4444-555555555555
+    flow: xtls-rprx-vision
+    servername: www.microsoft.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: PUBKEY
+      short-id: ab12
+  - {name: SOCKS, type: socks5, server: 5.6.7.8, port: 1080, username: user, password: pass}
+  - {name: SKIP, type: wireguard, server: 9.9.9.9, port: 51820}
+proxy-groups:
+  - name: Auto
+    type: url-test
+'''
+clash_nodes, clash_skipped = parse_subscription(clash_yaml)
+check("Clash YAML SS", clash_nodes[0], type="shadowsocks", tag="HK-SS", method="aes-256-gcm", password="p#ss")
+check("Clash YAML VMess WS", clash_nodes[1], type="vmess", tls__server_name="vm.example.com",
+      transport__type="ws", transport__path="/websocket", transport__headers__Host="cdn.example.com")
+check("Clash YAML VLESS Reality", clash_nodes[2], type="vless", flow="xtls-rprx-vision",
+      tls__reality__enabled=True, tls__reality__public_key="PUBKEY", tls__reality__short_id="ab12")
+check("Clash YAML 流式 SOCKS", clash_nodes[3], type="socks", username="user", password="pass")
+if len(clash_nodes) != 4 or len(clash_skipped) != 1 or "wireguard" not in clash_skipped[0]:
+    print("[FAIL] Clash YAML 跳过统计", len(clash_nodes), clash_skipped); fails += 1
+else:
+    print("[OK]   Clash YAML 跳过统计")
+
 # 非法
+try:
+    m.parse_link("ssh://alice@ssh.example.com:22#SSH")
+    print("[FAIL] ssh 缺密码未报错"); fails += 1
+except ValueError:
+    print("[OK]   ssh 缺密码正确报错")
+
 try:
     m.parse_link("garbage no scheme")
     print("[FAIL] 非法输入未报错"); fails += 1

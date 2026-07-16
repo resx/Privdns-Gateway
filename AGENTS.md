@@ -8,7 +8,7 @@
 
 1. Phones send DoT queries to mosdns on port 853. It checks the carrier CIDR, resolves direct domains through configured upstreams, and rewrites proxy-domain A records to the gateway while suppressing AAAA/HTTPS responses.
 2. Rewritten traffic reaches sing-box on ports 80/443. SNI or Host selects a direct or node outbound; GMS ports 5228–5230 use `gms-mtalk`. nftables restricts these entries to the internal CIDR.
-3. Telegram and the PWA manage subscriptions, exits, and routing through shared services; sing-box writes follow lock → validate → atomic replace → restart → rollback. `pdg` handles lifecycle. HTTPS 9443 is CIDR-restricted.
+3. Telegram and the PWA manage subscriptions, exits, and routing through shared services; sing-box writes follow lock → validate → atomic replace → restart → rollback. `pdg` handles lifecycle. HTTPS 9443 and socket-activated iOS profile downloads on 8111 are CIDR-restricted; iOS downloads also require an exact published-file allowlist.
 
 ## Build and Development Commands
 
@@ -34,7 +34,7 @@ Noninteractive installs use `PDG_NONINTERACTIVE=1`, server/CIDR/domain values, a
 
 ## Release Versioning
 
-Project releases use SemVer tags. During an unfinished major release, keep the base version fixed and advance `-alpha.N`, `-beta.N`, then `-rc.N`; only tag `vMAJOR.MINOR.PATCH` after stability acceptance. Published tags are immutable: never force-move or reuse a tag, and increment the prerelease or patch number for every follow-up fix. Patch releases contain compatible fixes, minor releases add backward-compatible functionality, and major releases may break compatibility. Do not use version numbers to count features or same-day iterations.
+Project releases use SemVer tags. During an unfinished major release, keep the base version fixed and advance `-alpha.N`, `-beta.N`, then `-rc.N`; only tag `vMAJOR.MINOR.PATCH` after stability acceptance. Stable SemVer tags (`vMAJOR.MINOR.PATCH`) are immutable and must never be force-moved or reused. Pre-release tags (`alpha.N`, `beta.N`, `rc.N`) are treated as inflight: when a serious defect makes a pre-release unusable, fix and force-move the same tag rather than burning a new pre-release number; do not release a follow-up pre-release just to patch the previous one. `pdg update` already prunes stale local tags and force-fetches release refs, so tag moves reach existing installs safely. Patch releases contain compatible fixes, minor releases add backward-compatible functionality, and major releases may break compatibility. Do not use version numbers to count features or same-day iterations.
 
 ## Architecture Overview
 

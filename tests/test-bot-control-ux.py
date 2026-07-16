@@ -92,4 +92,19 @@ bot.state[3] = "add_exit"
 bot.handle_cb(3, 11, "menu")
 assert 3 not in bot.pending_outbound and 3 not in bot.state
 
+# 批量域名和 CIDR 使用共享服务，最后一个参数作为目标出口。
+rule_calls = []
+bot._gateway.set_rules = lambda values, target: rule_calls.append(("domain", values, target)) or {
+    "count": len(values), "target": target,
+}
+bot._gateway.set_cidrs = lambda values, target: rule_calls.append(("cidr", values, target)) or {
+    "count": len(values), "target": target,
+}
+bot.state[4] = "add_rule"
+bot.handle_text(4, "one.example\ntwo.example hk")
+assert rule_calls[-1] == ("domain", ["one.example", "two.example"], "hk")
+bot.state[5] = "add_rule"
+bot.handle_text(5, "10.0.0.0/8 jp")
+assert rule_calls[-1] == ("cidr", ["10.0.0.0/8"], "jp")
+
 print("bot-control-ux regression OK")

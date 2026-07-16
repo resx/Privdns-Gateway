@@ -74,6 +74,7 @@ jobs:
               deploy/bot/pdg-bot.service deploy/bot/pdg-health.service \
               deploy/bot/pdg-rules-update.service deploy/bot/pdg-health.timer \
               deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service \
+              deploy/ios/pdg-ios-profile.socket deploy/ios/pdg-ios-profile@.service \
               deploy/admin/pdg-admin.service || true
             echo "(CI 环境缺二进制/路径, 上面的告警多为预期; 重点看指令拼写/语法错)"
           else
@@ -85,6 +86,9 @@ jobs:
           command -v shellcheck >/dev/null || sudo apt-get install -y -q shellcheck
           shellcheck --severity=warning -e SC1091 \
             install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh lib/*.sh tests/*.sh
+
+      - name: "安装与卸载生命周期一致性回归"
+        run: bash tests/test-uninstall.sh
 
       - name: "防火墙迁移识别回归 (原装应迁移 / 自定义应跳过)"
         run: bash tests/test-fw-migration.sh
@@ -104,6 +108,9 @@ jobs:
       - name: "bot 导航回归 (操作结果不刷一级菜单)"
         run: python3 tests/test-bot-nav.py
 
+      - name: "bot Telegram 传输回归 (轮询/API 连接隔离 + 断线重连)"
+        run: python3 tests/test-bot-transport.py
+
       - name: "配置控制事务回归 (锁/校验/原子应用/回滚)"
         run: python3 tests/test-pdg-control.py
 
@@ -119,6 +126,9 @@ jobs:
       - name: "bot 出口交互回归 (预览确认/删除影响/输入重试)"
         run: python3 tests/test-bot-control-ux.py
 
+      - name: "bot iOS 二维码/文件回归"
+        run: python3 tests/test-bot-ios.py
+
       - name: "bot 测域名规则集显示名回归"
         run: python3 tests/test-domain-label.py
 
@@ -133,6 +143,11 @@ jobs:
 
       - name: "iOS 描述文件回归 (Wi-Fi 探测判定 + SSID 直连名单)"
         run: python3 tests/test-ios-ssid.py
+
+      - name: "iOS 常驻下载服务与安装二维码回归"
+        run: |
+          python3 tests/test-ios-profile-http.py
+          bash tests/test-ios-deploy.sh
 
       - name: "自检防火墙端口回归"
         run: python3 tests/test-doctor-firewall.py

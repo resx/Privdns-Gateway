@@ -36,7 +36,7 @@ interface Exit {
   references: number
 }
 interface Rule {
-  kind: 'domain' | 'direct' | 'ruleset'
+  kind: 'domain' | 'cidr' | 'direct' | 'ruleset'
   value: string
   label: string
   target: string
@@ -230,7 +230,9 @@ const showRuleComposer = ref(false)
 const showRulesetComposer = ref(false)
 const expandedRuleKey = ref<string | null>(null)
 const ruleDomain = ref('')
+const ruleInputKind = ref<'domain' | 'cidr'>('domain')
 const ruleTarget = ref('direct')
+const ruleOrderBusy = ref(false)
 const routeDomain = ref('')
 const routeResult = ref<RouteResult | null>(null)
 const groupName = ref('')
@@ -285,6 +287,12 @@ watch(ruleSort, value => localStorage.setItem('pdg-rule-sort', value))
 watch(connectionSort, value => localStorage.setItem('pdg-connection-sort', value))
 watch(connectionSortDesc, value => localStorage.setItem('pdg-connection-sort-desc', String(value)))
 watch(resourceWorkspace, value => localStorage.setItem('pdg-resource-workspace', value))
+watch(ruleInputKind, value => {
+  if (value === 'cidr' && ruleTarget.value === 'direct') {
+    const defaultTarget = overview.value?.default_exit || ''
+    ruleTarget.value = exits.value.some(item => item.tag === defaultTarget) ? defaultTarget : exits.value[0]?.tag || ''
+  }
+})
 
 const concreteExits = computed(() => exits.value.filter(item => !item.members.length))
 const strategyGroups = computed(() => exits.value.filter(item => item.members.length))
@@ -480,9 +488,13 @@ const policyTargets = computed(() => {
 })
 const ruleKindCounts = computed(() => ({
   domain: rules.value.filter(item => item.kind === 'domain').length,
+  cidr: rules.value.filter(item => item.kind === 'cidr').length,
   direct: rules.value.filter(item => item.kind === 'direct').length,
   ruleset: rules.value.filter(item => item.kind === 'ruleset').length,
 }))
+const orderedManagedRules = computed(() => rules.value
+  .filter(item => item.kind !== 'direct')
+  .sort((left, right) => left.order - right.order))
 const filteredRules = computed(() => {
   const query = search.value.trim().toLowerCase()
   const output = rules.value.filter(item => {
@@ -551,7 +563,7 @@ const navItems = [
   { id: 'runtime' as Page, label: '连接', icon: Activity },
   { id: 'system' as Page, label: '系统', icon: Settings },
 ]
-const protocolOptions = ['shadowsocks', 'vmess', 'trojan', 'vless', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'shadowtls', 'socks', 'http']
+const protocolOptions = ['shadowsocks', 'vmess', 'trojan', 'vless', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'shadowtls', 'ssh', 'socks', 'http']
 const overridePresets: OverridePreset[] = [
   {
     id: 'cleanup', name: '清理套餐信息', description: '过滤剩余流量、到期时间、官网和套餐说明等伪节点。',
@@ -656,7 +668,13 @@ async function loadAll() {
     rules.value = ruleList
     rulesets.value = rulesetList
     subscriptions.value = subscriptionList
-    if (!exits.value.some(item => item.tag === ruleTarget.value)) ruleTarget.value = 'direct'
+    if ((ruleTarget.value !== 'direct' && !exits.value.some(item => item.tag === ruleTarget.value))
+        || (ruleInputKind.value === 'cidr' && ruleTarget.value === 'direct')) {
+      const defaultTarget = overview.value?.default_exit || ''
+      ruleTarget.value = ruleInputKind.value === 'cidr'
+        ? (exits.value.some(item => item.tag === defaultTarget) ? defaultTarget : exits.value[0]?.tag || '')
+        : 'direct'
+    }
     if (!exits.value.some(item => item.tag === rulesetTarget.value)) rulesetTarget.value = exits.value[0]?.tag || 'direct'
     if (!subscriptions.value.some(item => item.id === presetSubscriptionId.value)) presetSubscriptionId.value = subscriptions.value[0]?.id || ''
     if (!exits.value.some(item => item.tag === presetRulesetTarget.value)) presetRulesetTarget.value = overview.value?.default_exit || exits.value[0]?.tag || 'direct'
@@ -922,12 +940,21 @@ async function removeNodeSubscription(item: Subscription) {
 }
 
 async function saveRule() {
+  const values = [...new Set(ruleDomain.value.split(/[\s,]+/).map(value => value.trim()).filter(Boolean))]
+  if (!values.length) {
+    error.value = ruleInputKind.value === 'cidr' ? '请输入至少一个 CIDR' : '请输入至少一个域名'
+    return
+  }
+  if (ruleInputKind.value === 'cidr' && ruleTarget.value === 'direct') {
+    error.value = 'CIDR 规则请选择具体出口'
+    return
+  }
   error.value = ''
   try {
-    await api('/api/v1/rules', {
-      method: 'POST', body: JSON.stringify({ domain: ruleDomain.value.trim(), target: ruleTarget.value }),
+    await api('/api/v1/rules/batch', {
+      method: 'POST', body: JSON.stringify({ kind: ruleInputKind.value, values, target: ruleTarget.value }),
     })
-    flash('分流规则已保存')
+    flash(`已保存 ${values.length} 条${ruleInputKind.value === 'cidr' ? ' CIDR' : '域名'}规则`)
     ruleDomain.value = ''
     await loadAll()
   } catch (cause) {
@@ -940,11 +967,37 @@ async function removeRule(item: Rule) {
   if (!window.confirm(`删除 ${item.label} 的分流规则？`)) return
   error.value = ''
   try {
-    await api(`/api/v1/rules/${encodeURIComponent(item.value)}`, { method: 'DELETE' })
+    const path = item.kind === 'cidr'
+      ? `/api/v1/cidrs/${encodeURIComponent(item.value)}`
+      : `/api/v1/rules/${encodeURIComponent(item.value)}`
+    await api(path, { method: 'DELETE' })
     flash('规则已删除')
     await loadAll()
   } catch (cause) {
     error.value = cause instanceof Error ? cause.message : String(cause)
+  }
+}
+
+function rulePosition(item: Rule) {
+  return orderedManagedRules.value.findIndex(entry => entry.kind === item.kind && entry.value === item.value)
+}
+
+async function moveRule(item: Rule, direction: -1 | 1) {
+  const currentIndex = rulePosition(item)
+  const nextIndex = currentIndex + direction
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= orderedManagedRules.value.length || ruleOrderBusy.value) return
+  const order = orderedManagedRules.value.map(entry => ({ kind: entry.kind, value: entry.value }))
+  ;[order[currentIndex], order[nextIndex]] = [order[nextIndex], order[currentIndex]]
+  ruleOrderBusy.value = true
+  error.value = ''
+  try {
+    await api('/api/v1/rules/order', { method: 'PUT', body: JSON.stringify({ order }) })
+    flash('规则顺序已更新')
+    await loadAll()
+  } catch (cause) {
+    error.value = cause instanceof Error ? cause.message : String(cause)
+  } finally {
+    ruleOrderBusy.value = false
   }
 }
 
@@ -1067,9 +1120,15 @@ async function saveExistingRule(item: Rule, target: string) {
   ruleBusy.value = `${item.order}-${item.kind}-${item.value}`
   error.value = ''
   try {
-    await api('/api/v1/rules', {
-      method: 'POST', body: JSON.stringify({ domain: item.value, target }),
-    })
+    if (item.kind === 'cidr') {
+      await api('/api/v1/rules/batch', {
+        method: 'POST', body: JSON.stringify({ kind: 'cidr', values: [item.value], target }),
+      })
+    } else {
+      await api('/api/v1/rules', {
+        method: 'POST', body: JSON.stringify({ domain: item.value, target }),
+      })
+    }
     flash(`${item.label} → ${target}`)
     await loadAll()
   } catch (cause) {
@@ -1518,7 +1577,7 @@ onBeforeUnmount(() => {
         </section>
         <section v-if="showAdd" class="panel add-panel node-sheet">
           <div class="section-title sheet-title"><div><p class="eyebrow">NEW OUTBOUND</p><h2>添加手动节点</h2></div><button class="icon-button sheet-close" title="关闭" @click="showAdd = false"><X :size="18" /></button></div>
-          <div class="manual-node-form"><input v-model="manualName" placeholder="节点名称（留空使用链接中的名称）" @input="preview = null" /><textarea v-model="link" rows="4" placeholder="ss://、vless://、trojan://、hysteria2:// …" @input="preview = null"></textarea></div>
+          <div class="manual-node-form"><input v-model="manualName" placeholder="节点名称（留空使用链接中的名称）" @input="preview = null" /><textarea v-model="link" rows="4" placeholder="ss://、vless://、hysteria://、shadowtls://、ssh:// …" @input="preview = null"></textarea></div>
           <div v-if="preview" class="preview-card">
             <div><span>名称</span><strong>{{ preview.tag }}</strong></div>
             <div><span>协议</span><strong>{{ preview.type }}</strong></div>
@@ -1633,14 +1692,15 @@ onBeforeUnmount(() => {
           </div>
         </section>
         <section v-if="showRouteTester" class="panel route-tester command-panel">
-          <div><p class="eyebrow">ROUTE TEST</p><h2>查询域名最终出口</h2></div>
-          <div class="route-test-form"><input v-model="routeDomain" placeholder="输入域名" @keyup.enter="testRoute" /><button class="secondary" @click="testRoute">测试</button></div>
+          <div><p class="eyebrow">ROUTE TEST</p><h2>查询域名或 IP 的最终出口</h2></div>
+          <div class="route-test-form"><input v-model="routeDomain" placeholder="输入域名或 IP" @keyup.enter="testRoute" /><button class="secondary" @click="testRoute">测试</button></div>
           <div v-if="routeResult" class="route-result"><span>{{ routeResult.domain }}</span><strong>{{ routeResult.target }}</strong><small>{{ routeResult.kind }} · {{ routeResult.match }}</small></div>
         </section>
         <section v-if="ruleWorkspace === 'rules' && showRuleComposer" class="panel command-panel">
-          <div class="form-grid">
-            <input v-model="ruleDomain" placeholder="输入域名，例如 netflix.com" @keyup.enter="saveRule" />
-            <select v-model="ruleTarget"><option value="direct">direct · 直连</option><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }} · {{ item.type }}</option></select>
+          <div class="form-grid rule-form">
+            <select v-model="ruleInputKind"><option value="domain">域名</option><option value="cidr">IP-CIDR</option></select>
+            <textarea v-model="ruleDomain" rows="2" :placeholder="ruleInputKind === 'cidr' ? '输入 IPv4/IPv6 CIDR，可每行多个' : '输入域名，可每行多个，例如 netflix.com'" @keyup.ctrl.enter="saveRule"></textarea>
+            <select v-model="ruleTarget"><option v-if="ruleInputKind === 'domain'" value="direct">direct · 直连</option><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }} · {{ item.type }}</option></select>
             <button class="primary" @click="saveRule">保存规则</button>
           </div>
         </section>
@@ -1649,6 +1709,7 @@ onBeforeUnmount(() => {
             <div class="facet-row">
               <button :class="{ active: ruleKindFilter === 'all' }" @click="ruleKindFilter = 'all'">全部 {{ rules.length }}</button>
               <button :class="{ active: ruleKindFilter === 'domain' }" @click="ruleKindFilter = 'domain'">域名 {{ ruleKindCounts.domain }}</button>
+              <button :class="{ active: ruleKindFilter === 'cidr' }" @click="ruleKindFilter = 'cidr'">IP-CIDR {{ ruleKindCounts.cidr }}</button>
               <button :class="{ active: ruleKindFilter === 'direct' }" @click="ruleKindFilter = 'direct'">直连 {{ ruleKindCounts.direct }}</button>
               <button :class="{ active: ruleKindFilter === 'ruleset' }" @click="ruleKindFilter = 'ruleset'">规则集 {{ ruleKindCounts.ruleset }}</button>
             </div>
@@ -1659,7 +1720,7 @@ onBeforeUnmount(() => {
           </section>
           <section class="panel policy-table-panel">
             <div class="section-title rules-heading">
-              <div><p class="eyebrow">POLICIES</p><h2>规则清单 <span class="muted">{{ filteredRules.length }}</span></h2><small class="rule-priority-note">用户手动规则优先于规则集</small></div>
+              <div><p class="eyebrow">POLICIES</p><h2>规则清单 <span class="muted">{{ filteredRules.length }}</span></h2><small class="rule-priority-note">系统规则固定在前；配置顺序可用箭头调整</small></div>
               <div class="rule-tools">
                 <button v-if="ruleFiltersActive" class="secondary compact" @click="clearRuleFilters"><X :size="14" />清除筛选</button>
                 <select v-model="ruleSort"><option value="source">配置顺序</option><option value="name">名称排序</option><option value="target">目标排序</option></select>
@@ -1670,9 +1731,9 @@ onBeforeUnmount(() => {
               <article v-for="item in filteredRules" :key="`${item.kind}-${item.value}-${item.target}`" class="mature-rule" :class="{ expanded: expandedRuleKey === `${item.order}-${item.kind}-${item.value}` }">
                 <div class="mature-rule-main">
                   <button class="rule-expand" :disabled="!ruleTargetGroup(item)" :title="ruleTargetGroup(item) ? '展开目标策略组' : '目标不是策略组'" @click="toggleRulePolicy(item)"><ChevronDown v-if="expandedRuleKey === `${item.order}-${item.kind}-${item.value}`" :size="16" /><ChevronRight v-else :size="16" /></button>
-                  <span class="rule-index">{{ item.order + 1 }}</span>
-                  <div class="rule-match"><span>{{ item.kind === 'ruleset' ? 'RULE-SET' : item.kind === 'direct' ? 'DIRECT' : 'DOMAIN' }}</span><strong>{{ item.label }}</strong><small v-if="item.label !== item.value">{{ item.value }}</small></div>
-                  <div class="rule-policy-path"><span>{{ ruleBusy === `${item.order}-${item.kind}-${item.value}` || resourceBusy === `ruleset-${item.value}` ? '正在更新' : '目标策略' }}</span><select :disabled="ruleBusy === `${item.order}-${item.kind}-${item.value}` || resourceBusy === `ruleset-${item.value}`" :value="item.target" @change="updateRuleTarget(item, $event)"><option value="direct">direct</option><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select><small v-if="ruleTargetGroup(item)">{{ ruleTargetGroup(item)?.selected || (ruleTargetGroup(item)?.mode === 'auto' ? '自动优选' : '未选择') }}</small></div>
+                  <div v-if="ruleSort === 'source' && item.kind !== 'direct'" class="rule-order" :aria-label="`调整 ${item.label} 顺序`"><button :disabled="ruleOrderBusy || rulePosition(item) <= 0" title="上移" @click.stop="moveRule(item, -1)"><ArrowUp :size="13" /></button><button :disabled="ruleOrderBusy || rulePosition(item) < 0 || rulePosition(item) >= orderedManagedRules.length - 1" title="下移" @click.stop="moveRule(item, 1)"><ArrowDown :size="13" /></button></div><span v-else class="rule-index">{{ item.order + 1 }}</span>
+                  <div class="rule-match"><span>{{ item.kind === 'ruleset' ? 'RULE-SET' : item.kind === 'cidr' ? 'IP-CIDR' : item.kind === 'direct' ? 'DIRECT' : 'DOMAIN' }}</span><strong>{{ item.label }}</strong><small v-if="item.label !== item.value">{{ item.value }}</small></div>
+                  <div class="rule-policy-path"><span>{{ ruleBusy === `${item.order}-${item.kind}-${item.value}` || resourceBusy === `ruleset-${item.value}` ? '正在更新' : '目标策略' }}</span><select :disabled="ruleBusy === `${item.order}-${item.kind}-${item.value}` || resourceBusy === `ruleset-${item.value}`" :value="item.target" @change="updateRuleTarget(item, $event)"><option v-if="item.kind === 'domain' || item.kind === 'direct'" value="direct">direct</option><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select><small v-if="ruleTargetGroup(item)">{{ ruleTargetGroup(item)?.selected || (ruleTargetGroup(item)?.mode === 'auto' ? '自动优选' : '未选择') }}</small></div>
                   <span class="rule-size">{{ item.count ? `${item.count} 条` : '单条' }}</span>
                   <button v-if="item.kind !== 'ruleset'" class="rule-delete" title="删除规则" @click="removeRule(item)"><Trash2 :size="15" /></button>
                   <button v-else class="rule-provider-link" title="查看规则集" @click="ruleWorkspace = 'providers'"><Database :size="15" /></button>

@@ -110,6 +110,17 @@ class AdminHandler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/v1/rules":
             body = self._body()
             return self.service.set_rule(str(body.get("domain", "")), str(body.get("target", "")))
+        if method == "POST" and path == "/api/v1/rules/batch":
+            body = self._body()
+            kind = str(body.get("kind", "domain"))
+            values = body.get("values", [])
+            if kind == "domain":
+                return self.service.set_rules(values, str(body.get("target", "")))
+            if kind == "cidr":
+                return self.service.set_cidrs(values, str(body.get("target", "")))
+            raise ServiceError("批量规则类型无效")
+        if method == "PUT" and path == "/api/v1/rules/order":
+            return self.service.reorder_rules(self._body().get("order", []))
         if method == "POST" and path == "/api/v1/route/test":
             return self.service.test_route(str(self._body().get("domain", "")))
         if method == "GET" and path == "/api/v1/subscriptions":
@@ -223,6 +234,11 @@ class AdminHandler(BaseHTTPRequestHandler):
             if not connection_id or "/" in connection_id:
                 raise ServiceError("连接 ID 无效")
             return self.service.close_connection(connection_id)
+
+        cidr_prefix = "/api/v1/cidrs/"
+        if method == "DELETE" and path.startswith(cidr_prefix):
+            cidr = urllib.parse.unquote(path[len(cidr_prefix):])
+            return self.service.remove_cidr(cidr)
 
         rule_prefix = "/api/v1/rules/"
         if method == "DELETE" and path.startswith(rule_prefix):

@@ -13,6 +13,8 @@ set -euo pipefail
 
 REPO_URL="https://github.com/resx/Privdns-Gateway.git"
 CERT_DIR="/etc/mosdns/certs"
+IOS_PROFILE_PORT=8111
+IOS_WWW_DIR="/opt/pdg-bot/ios-www"
 NONINT="${PDG_NONINTERACTIVE:-}"
 # 二进制版本(MOSDNS_VER/SINGBOX_VER)+ 钉死 SHA256 来自 lib/versions.sh, 自举进仓库后 source(见下)
 
@@ -107,15 +109,23 @@ rollback(){
     return
   fi
   c_y "安装失败 → 回滚本次全新安装的改动…"
-  systemctl disable --now pdg-bot pdg-admin pdg-probe81 mosdns sing-box \
+  systemctl disable --now pdg-bot pdg-admin pdg-probe81 pdg-ios-profile.socket mosdns sing-box \
       pdg-rules-update.timer pdg-health.timer 2>/dev/null
-  rm -f /etc/systemd/system/{pdg-bot,pdg-admin,pdg-probe81,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
-        /etc/systemd/system/pdg-rules-update.timer /etc/systemd/system/pdg-health.timer \
+  rm -f /etc/systemd/system/{pdg-bot,pdg-admin,pdg-probe81,pdg-ios-profile,mosdns,sing-box,pdg-rules-update,pdg-health}.service \
+        /etc/systemd/system/pdg-ios-profile.socket /etc/systemd/system/pdg-ios-profile@.service \
+        /etc/systemd/system/pdg-rules-update.timer \
+        /etc/systemd/system/pdg-health.timer \
         /etc/systemd/system/journald.conf.d/50-pdg.conf
   systemctl daemon-reload 2>/dev/null
+  systemctl restart systemd-journald 2>/dev/null
   nft delete table inet pdg 2>/dev/null
+  if [[ -f /etc/privdns-gateway/sysctl-keepalive.orig ]]; then
+    sysctl -p /etc/privdns-gateway/sysctl-keepalive.orig >/dev/null 2>&1
+  fi
+  rm -f /etc/sysctl.d/99-pdg-keepalive.conf
   rm -rf /etc/mosdns /etc/sing-box /opt/pdg-bot /opt/pdg-admin /etc/privdns-gateway
-  rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh}
+  rm -f /usr/local/bin/{pdg,pdg-set-token,proxy-gateway-open-cert-http.sh,proxy-gateway-restore-firewall.sh} \
+        /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
   [[ "$MOSDNS_INSTALLED" == 1 ]] && rm -f /usr/local/bin/mosdns
   [[ "$SINGBOX_INSTALLED" == 1 ]] && rm -f /usr/local/bin/sing-box
   # 还原系统级改动(仅全新安装才到这里)
@@ -135,7 +145,7 @@ trap 'on_exit $?' EXIT
 c_g "安装依赖…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl tar unzip nftables python3 openssl certbot dnsutils tcpdump jq ca-certificates vnstat >/dev/null
+apt-get install -y -qq curl tar unzip nftables python3 openssl certbot dnsutils tcpdump jq ca-certificates vnstat qrencode >/dev/null
 systemctl enable --now vnstat >/dev/null 2>&1 || true   # 网卡流量统计(轻量, ~3MB)
 
 # ── 2. mosdns ──
@@ -211,6 +221,7 @@ fi
 # ── 5. 目录 + 静态文件 ──
 c_g "铺设文件…"
 install -d /etc/mosdns/rules /etc/sing-box/rs /opt/pdg-bot /opt/pdg-admin/web "$CERT_DIR" /etc/letsencrypt/renewal-hooks/deploy /etc/systemd/system/journald.conf.d
+install -d -m700 /etc/privdns-gateway
 install -m755 "$REPO_DIR"/deploy/bot/pdg-bot.py            /opt/pdg-bot/bot.py
 install -m755 "$REPO_DIR"/deploy/bot/pdg_control.py         /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/pdg_links.py           /opt/pdg-bot/
@@ -227,7 +238,11 @@ install -m755 "$REPO_DIR"/deploy/bot/checks.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/doctor.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/bot/report.py           /opt/pdg-bot/
 install -m755 "$REPO_DIR"/deploy/ios/probe81.py           /opt/pdg-bot/
+install -m755 "$REPO_DIR"/deploy/ios/profile-http.py        /opt/pdg-bot/
 install -m644 "$REPO_DIR"/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl /opt/pdg-bot/pdg-dot.mobileconfig.tmpl
+install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile.socket /etc/systemd/system/
+install -m644 "$REPO_DIR"/deploy/ios/pdg-ios-profile@.service /etc/systemd/system/
+install -d -m755 "$IOS_WWW_DIR"
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-open-cert-http.sh     /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/proxy-gateway-restore-firewall.sh   /usr/local/bin/
 install -m755 "$REPO_DIR"/deploy/cert/99-reload-cert.deploy-hook.sh       /etc/letsencrypt/renewal-hooks/deploy/99-pdg-cert.sh
@@ -249,6 +264,15 @@ chmod 700 /etc/sing-box; chmod 600 /etc/sing-box/config.json   # config 含出�
 
 # DoT/数据连接保活: 内核 TCP keepalive 调短, 维持设备休眠/待机与基站专线期间 NAT 表项不断。
 # mosdns :853 与 sing-box :443/:80 共用此内核参数(两者默认 SO_KEEPALIVE 已开, 仅间隔过长)。
+# 全新安装先记录原值，卸载或安装失败时恢复；覆盖重装不改写已有备份。
+if [[ "$PRIOR_INSTALL" == 0 && ! -e /etc/privdns-gateway/sysctl-keepalive.orig ]]; then
+  {
+    printf 'net.ipv4.tcp_keepalive_time = %s\n' "$(sysctl -n net.ipv4.tcp_keepalive_time)"
+    printf 'net.ipv4.tcp_keepalive_intvl = %s\n' "$(sysctl -n net.ipv4.tcp_keepalive_intvl)"
+    printf 'net.ipv4.tcp_keepalive_probes = %s\n' "$(sysctl -n net.ipv4.tcp_keepalive_probes)"
+  } > /etc/privdns-gateway/sysctl-keepalive.orig
+  chmod 600 /etc/privdns-gateway/sysctl-keepalive.orig
+fi
 cat > /etc/sysctl.d/99-pdg-keepalive.conf <<'EOF'
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 15
@@ -261,9 +285,10 @@ render "$REPO_DIR/deploy/bot/pdg-bot.service"         > /etc/systemd/system/pdg-
 chmod 644 /etc/systemd/system/pdg-bot.service        # 不再含 token (token 在 bot.env)
 
 # token / 允许 id 写入受限文件(目录 700 / 文件 600), 不进 unit 也不进版本库
-install -d -m700 /etc/privdns-gateway
 ( umask 077; printf 'PDG_BOT_TOKEN=%s\nPDG_BOT_ALLOWED=%s\n' "$BOT_TOKEN" "$ALLOWED_IDS" > /etc/privdns-gateway/bot.env )
 chmod 600 /etc/privdns-gateway/bot.env
+( umask 077; printf 'PDG_IOS_ALLOWED_CIDRS=%s\n' "$INTERNAL_CIDR" > /etc/privdns-gateway/ios-profile.env )
+chmod 600 /etc/privdns-gateway/ios-profile.env
 ADMIN_TOKEN="${PDG_ADMIN_TOKEN:-}"
 if [[ -z "$ADMIN_TOKEN" && -s /etc/privdns-gateway/admin.token ]]; then
   ADMIN_TOKEN=$(cat /etc/privdns-gateway/admin.token)
@@ -328,6 +353,59 @@ else
   install -m600 "/etc/letsencrypt/live/$DOT_DOMAIN/privkey.pem"   "$CERT_DIR/privkey.pem"
 fi
 
+# ── iOS 描述文件下载服务 ──
+# 描述文件本身不含节点凭据; 下载端口仍只对内网 CIDR 放行。
+write_ios_profile_allowlist(){
+  local allowlist="$IOS_WWW_DIR/.ios-profile-allowlist" tmp profile name
+  tmp=$(mktemp "$IOS_WWW_DIR/.ios-allowlist.XXXXXX")
+  {
+    printf '%s\n' 'ios-dot.mobileconfig'
+    for profile in "$IOS_WWW_DIR"/ios-*.mobileconfig; do
+      [[ -f "$profile" ]] || continue
+      name=${profile##*/}
+      [[ "$name" =~ ^ios-[0-9a-f]{12}\.mobileconfig$ ]] && printf '%s\n' "$name"
+    done
+  } | sort -u > "$tmp"
+  install -m644 "$tmp" "$allowlist"
+  rm -f "$tmp"
+}
+
+generate_ios_profile(){
+  local template="$REPO_DIR/deploy/ios/pdg-dot-ondemand.mobileconfig.tmpl"
+  local profile="$IOS_WWW_DIR/ios-dot.mobileconfig"
+  local tmp index_tmp
+  tmp=$(mktemp "$IOS_WWW_DIR/.ios-profile.XXXXXX")
+  index_tmp=$(mktemp "$IOS_WWW_DIR/.ios-index.XXXXXX")
+  PROFILE_TEMPLATE="$template" PROFILE_OUT="$tmp" PROFILE_DOMAIN="$DOT_DOMAIN" PROFILE_IP="$SERVER_IP" \
+    python3 - <<'PY'
+import os
+import uuid
+from pathlib import Path
+
+template = Path(os.environ["PROFILE_TEMPLATE"]).read_text(encoding="utf-8")
+rendered = (template.replace("__DOT_HOST__", os.environ["PROFILE_DOMAIN"])
+            .replace("__JP_IP__", os.environ["PROFILE_IP"])
+            .replace("__UUID1__", str(uuid.uuid4()).upper())
+            .replace("__UUID2__", str(uuid.uuid4()).upper()))
+Path(os.environ["PROFILE_OUT"]).write_text(rendered, encoding="utf-8")
+PY
+  install -m644 "$tmp" "$profile"
+  rm -f "$tmp"
+  write_ios_profile_allowlist
+  cat > "$index_tmp" <<EOF
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PrivDNS Gateway iOS</title>
+<p><a href="/ios-dot.mobileconfig">下载 iOS DoT 描述文件</a></p>
+EOF
+  install -m644 "$index_tmp" "$IOS_WWW_DIR/index.html"
+  rm -f "$index_tmp"
+  printf '%s\n' "http://${DOT_DOMAIN}:${IOS_PROFILE_PORT}/ios-dot.mobileconfig" > "$IOS_WWW_DIR/ios-profile-url.txt"
+  chmod 644 "$IOS_WWW_DIR/ios-profile-url.txt"
+}
+
+generate_ios_profile
+
 # ── 7. geosite 规则库 (此时 DNS 仍可用) ──
 c_g "下载并解析 geosite 规则库…"
 bash /opt/pdg-bot/update-rules.sh || c_y "geosite 下载失败, 装好后可在 bot『更新规则库』重试"
@@ -343,7 +421,7 @@ fi
 rm -f /etc/resolv.conf; printf 'nameserver 1.1.1.1\n' > /etc/resolv.conf
 systemctl daemon-reload
 systemctl restart systemd-journald
-systemctl enable --now mosdns sing-box pdg-admin pdg-probe81 >/dev/null 2>&1 || true
+systemctl enable --now mosdns sing-box pdg-admin pdg-probe81 pdg-ios-profile.socket >/dev/null 2>&1 || true
 systemctl enable --now pdg-rules-update.timer >/dev/null 2>&1 || true
 systemctl enable --now pdg-health.timer >/dev/null 2>&1 || true
 if [[ -n "$BOT_TOKEN" && -n "$ALLOWED_IDS" ]]; then
@@ -365,7 +443,7 @@ c_g "校验核心服务(需连续保持 active, 防起来又崩)…"
 svc_ok=0; streak=0
 for _ in $(seq 1 20); do
   allact=1
-  for s in mosdns sing-box pdg-admin pdg-probe81; do
+  for s in mosdns sing-box pdg-admin pdg-probe81 pdg-ios-profile.socket; do
     [[ "$(systemctl is-active "$s" 2>/dev/null)" == active ]] || allact=0
   done
   if [[ "$allact" == 1 ]]; then streak=$((streak+1)); else streak=0; fi
@@ -373,7 +451,7 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 if [[ "$svc_ok" != 1 ]]; then
-  for s in mosdns sing-box pdg-admin pdg-probe81; do printf '  %-12s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
+  for s in mosdns sing-box pdg-admin pdg-probe81 pdg-ios-profile.socket; do printf '  %-24s %s\n' "$s" "$(systemctl is-active "$s" 2>/dev/null)"; done
   journalctl -u mosdns -u sing-box -u pdg-admin -n 20 --no-pager 2>/dev/null | sed 's/^/    /'
   die "核心服务未能持续保持运行(见上日志)。"   # → 触发回滚
 fi
@@ -381,7 +459,7 @@ INSTALL_OK=1   # 提交点: 核心服务已确认稳定 active, 后面只是打�
 
 # ── 10. 自检 ──
 echo; c_g "安装完成。状态:"
-for s in mosdns sing-box pdg-bot pdg-admin pdg-probe81; do printf "  %-12s %s\n" "$s" "$(systemctl is-active "$s")"; done
+for s in mosdns sing-box pdg-bot pdg-admin pdg-probe81 pdg-ios-profile.socket; do printf "  %-24s %s\n" "$s" "$(systemctl is-active "$s")"; done
 if [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]]; then
   echo; c_y "⚠️ 管理 bot 未启用(没填 token)。出口和分流规则都在 bot 里设——"
   c_y "   现在还没法配代理。先跑:  sudo pdg-set-token  设好 token, 再给 bot 发 /start。"
@@ -393,10 +471,15 @@ cat <<EOF
   $( [[ -z "$BOT_TOKEN" || -z "$ALLOWED_IDS" ]] && echo "2) 启用管理 bot:  sudo pdg-set-token  (之后再发 /start)" || echo "2) Telegram 给你的 bot 发 /start, 然后:" )
        • 「📤 出口管理 → 添加」粘贴 ss:// / vmess:// / trojan:// / vless:// 落地节点
        • 「📑 分流管理」按需把域名/规则集指到出口 (默认其余国际走 jp 直出)
-  3) iOS 用户: bot「📱 客户端 → iOS 描述文件」, 装上即可(蜂窝探测 :81 已就绪)
+  3) iOS 用户: 手机走【内网卡/蜂窝, 关 WiFi】扫描下方二维码, Safari 打开后安装描述文件(蜂窝探测 :81 已就绪)
+     下载地址: http://${DOT_DOMAIN}:${IOS_PROFILE_PORT}/ios-dot.mobileconfig
   4) 管理面板: https://$DOT_DOMAIN:9443/  (仅内网卡可达; Bot「📱 客户端 → 管理面板」自动带令牌)
   5) 换域名随时用 bot「🌐 DoT 自定义域名」
 
 🛠 日常管理:  sudo pdg   (状态 / 管理面板令牌 / 更新 / 重启 / 日志 / 卸载)
 ⚠️ SSH 端口当前按 $SSH_PORT 放行; 若你之后改 sshd Port, 记得同步改 /etc/nftables.conf 再 nft -f。
+
+iOS 扫码安装:
 EOF
+qrencode -t ANSIUTF8 "http://${DOT_DOMAIN}:${IOS_PROFILE_PORT}/ios-dot.mobileconfig"
+printf '\n'

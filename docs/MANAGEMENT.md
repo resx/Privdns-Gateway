@@ -31,7 +31,7 @@ sudo pdg admin --rotate  # 令牌泄露时轮换;旧链接立即失效
 | 批量测速/默认出口 | `POST /api/v1/exits/test`, `PUT /api/v1/final` |
 | 节点组保存/选择/删除 | `POST /api/v1/groups`, `PUT .../{tag}/selection`, `DELETE .../{tag}` |
 | 节点订阅 | `GET/POST /api/v1/subscriptions`, `POST .../preview`, `PUT/DELETE .../{id}`, `POST .../{id}/refresh` |
-| 分流列表/保存/删除 | `GET /api/v1/rules`, `POST /api/v1/rules`, `DELETE /api/v1/rules/{domain}` |
+| 分流列表/保存/排序/删除 | `GET/POST /api/v1/rules`, `POST .../rules/batch`, `PUT .../rules/order`, `DELETE .../rules/{domain}`, `DELETE .../cidrs/{cidr}` |
 | 路由模拟 | `POST /api/v1/route/test` |
 | 规则集管理 | `GET/POST /api/v1/rulesets`, `PUT/DELETE /api/v1/rulesets/{tag}`, `POST .../{tag}/refresh`, `POST .../refresh` |
 | 资源状态/Geosite | `GET /api/v1/resources`, `POST /api/v1/resources/geosite/refresh` |
@@ -42,7 +42,7 @@ sudo pdg admin --rotate  # 令牌泄露时轮换;旧链接立即失效
 
 API 从不返回节点密码、UUID、原始订阅令牌或未脱敏订阅 URL。持久化出口、组内节点、订阅分类和分流由 PWA/Bot 调用 `deploy/bot/pdg_control.py`，执行锁定、候选校验、原子替换和失败回滚。项目更新 API 只启动现有 `pdg update` 瞬时任务，不直接修改安装文件。
 
-节点订阅支持 Base64 URI 列表、纯文本 URI 列表和 SIP008 JSON，单订阅限制 8MB/500 个节点；Clash YAML 暂不支持。添加和修改必须先预览新增、更新、移除与跳过数量。结构化覆写支持协议过滤、正则重命名、名称排序、TCP Fast Open 和 UDP 分片属性；不执行远程脚本，也不开放任意 JSON Patch。每个订阅拥有稳定标签前缀、一个全节点自动组，并可用最多 12 条“分类名=正则”生成地区/线路组；自动组可持久化固定到成员节点，再恢复自动优选。每日规则更新任务会逐个刷新订阅和规则集，失败时保留旧配置并记录错误。订阅元数据保存在权限为 600 的 `/opt/pdg-bot/subscriptions.json`。规则集下载仅接受 HTTP/HTTPS，单文件限制 16MB。
+分流管理支持一次提交最多 200 个域名或 CIDR，并可调整手工域名、CIDR 和规则集的匹配顺序；系统入站与拒绝规则始终固定在最前，自定义顺序会持久保留。节点订阅支持 Clash YAML `proxies`、Base64 URI 列表、纯文本 URI 列表和 SIP008 JSON，单订阅限制 8MB/500 个节点。Clash 导入覆盖 SS、VMess、Trojan、VLESS、Hysteria v1/v2、TUIC、AnyTLS、ShadowTLS、SSH、SOCKS5 和 HTTP；策略组、规则、不支持的节点及带 plugin 的 SS 不会导入，并计入跳过数量。添加和修改必须先预览新增、更新、移除与跳过数量。结构化覆写支持协议过滤、正则重命名、名称排序、TCP Fast Open 和 UDP 分片属性；不执行远程脚本，也不开放任意 JSON Patch。每个订阅拥有稳定标签前缀、一个全节点自动组，并可用最多 12 条“分类名=正则”生成地区/线路组；自动组可持久化固定到成员节点，再恢复自动优选。每日规则更新任务会逐个刷新订阅和规则集，失败时保留旧配置并记录错误。订阅元数据保存在权限为 600 的 `/opt/pdg-bot/subscriptions.json`。规则集下载仅接受 HTTP/HTTPS，单文件限制 16MB。
 
 ## 前端开发
 
