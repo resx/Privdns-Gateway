@@ -69,6 +69,16 @@ with tempfile.TemporaryDirectory() as directory:
         ios_access_path=str(ios_access_path),
     )
 
+    source, source_count, source_ip_only = service._source_rules(
+        b"payload:\n  - DOMAIN-SUFFIX,ai.example\n  - DOMAIN-KEYWORD,cloud\n"
+        b"  - IP-CIDR,203.0.113.0/24,no-resolve\n"
+    )
+    assert source_count == 3 and not source_ip_only
+    assert source["rules"][0] == {
+        "domain_suffix": ["ai.example"], "domain_keyword": ["cloud"],
+        "ip_cidr": ["203.0.113.0/24"],
+    }
+
     overview = service.overview()
     assert overview["default_exit"] == "hk" and overview["proxy_count"] == 1
     assert all(value == "active" for value in overview["services"].values())

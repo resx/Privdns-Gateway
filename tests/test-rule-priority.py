@@ -11,6 +11,30 @@ bot = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(bot)
 
+
+class RulesetResponse:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        return None
+
+    def read(self):
+        return (
+            b"payload:\n  - DOMAIN-SUFFIX,chat.example\n  - DOMAIN-KEYWORD,ai\n"
+            b"  - IP-CIDR,198.51.100.0/24,no-resolve\n  - PROCESS-NAME,client\n"
+        )
+
+
+original_urlopen = bot.urllib.request.urlopen
+bot.urllib.request.urlopen = lambda *_args, **_kwargs: RulesetResponse()
+try:
+    domains, suffixes, keywords, cidrs = bot._fetch_surge("https://rules.example/ai.yaml")
+finally:
+    bot.urllib.request.urlopen = original_urlopen
+assert not domains and suffixes == ["chat.example"] and keywords == ["ai"]
+assert cidrs == ["198.51.100.0/24"]
+
 config = {
     "outbounds": [
         {"type": "direct", "tag": "jp"},

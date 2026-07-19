@@ -2,7 +2,7 @@
 """PrivDNS Gateway — Telegram 管理 bot v3 (纯标准库, long-poll)。
 
 出口  : 列表 / 添加节点分享链接 / 删除 / 改名(级联更新引用) / 设默认出口 / 故障切换组(urltest)
-分流  : 规则列表 / 添加(域名→出口|direct) / 删除 / 添加规则集(Surge .list URL→出口) / 删除规则集
+分流  : 规则列表 / 添加(域名→出口|direct) / 删除 / 添加规则集(Surge/Clash classical 文本→出口) / 删除规则集
 诊断  : 状态 / 端到端测出口延迟(clash_api) / 流量统计(clash_api)
 运维  : 重启 / 更新规则库(geosite + 规则集) / iOS 描述文件下发 / 配置备份·恢复
 
@@ -558,7 +558,7 @@ def set_tfo(on):
     return ok, ((f"✅ TFO 已{'开启' if on else '关闭'}(出口+入口)\n"
                  "降到落地的握手延迟; 需落地端也支持, 否则自动回落普通握手。") if ok else msg)
 
-# ── 规则集 (Surge .list -> sing-box local rule_set) ──
+# ── 规则集 (Surge/Clash classical -> sing-box local rule_set) ──
 def _rs_meta():
     if os.path.exists(RS_META):
         return json.load(open(RS_META))
@@ -577,6 +577,8 @@ def _fetch_surge(url):
         line = line.split("#", 1)[0].split("//", 1)[0].strip()
         if not line:
             continue
+        # 兼容 Clash classical provider 的 payload 列表；进程/用户代理条件仍按 SNI 网关边界忽略。
+        line = re.sub(r"^-\s*", "", line)
         p = [x.strip() for x in line.split(",")]
         t = p[0].upper()
         if t == "DOMAIN" and len(p) > 1:
@@ -595,10 +597,10 @@ def _fetch_bytes(url):
         return r.read()
 
 def _build_source(url, path):
-    """下载 Surge/Clash 文本 → 写 sing-box source rule_set。返回 (条数, 是否纯IP)。"""
+    """下载 Surge/Clash classical 文本 → 写 sing-box source rule_set。返回 (条数, 是否纯IP)。"""
     dom, suf, kw, ip = _fetch_surge(url)
     if not (dom or suf or kw or ip):
-        raise ValueError("没解析出规则(支持 DOMAIN/-SUFFIX/-KEYWORD/IP-CIDR)")
+        raise ValueError("没解析出规则(支持 Surge/Clash classical 的 DOMAIN/-SUFFIX/-KEYWORD/IP-CIDR)")
     rule = {}
     if dom:
         rule["domain"] = dom
@@ -1808,7 +1810,7 @@ def handle_cb(chat, mid, data):
         edit(chat, mid, "发域名或 IP，查询最终出口/命中规则。\n例: <code>netflix.com</code> / <code>10.1.2.3</code>\n/cancel 取消。", RULE_BACK); return
     if data == "add_rs":
         state[chat] = "add_rs"
-        edit(chat, mid, "发「<b>规则集URL 出口 [名称]</b>」(后缀 .list / .txt / .srs)。\n"
+        edit(chat, mid, "发「<b>规则集URL 出口 [名称]</b>」(后缀 .list / .txt / .yaml / .srs)。\n"
              f"出口: {', '.join(exit_tags(load()))}\n名称可留空(之后用「✏️ 改规则集名」改)。\n"
              "例: <code>https://.../Binance.list tw 币安</code>\n/cancel 取消。", RULE_BACK); return
     if data == "del_rs":
@@ -2090,7 +2092,7 @@ def handle_text(chat, text, message_id=None):
         if cmd == "/delrule":
             state[chat] = "del_rule"; send(chat, "发要删除的域名。/cancel 取消。", BACK); return
         if cmd == "/addrs":
-            state[chat] = "add_rs"; send(chat, "发「<b>规则集URL 出口</b>」（支持 .list / .srs）。/cancel 取消。", BACK); return
+            state[chat] = "add_rs"; send(chat, "发「<b>规则集URL 出口</b>」（支持 .list / .txt / .yaml / .srs）。/cancel 取消。", BACK); return
         if cmd == "/delexit":
             tags = deletable_tags(load())
             send(chat, "选择删除的出口/组：" if tags else "无可删出口", kb_pick("delx", tags) if tags else BACK); return

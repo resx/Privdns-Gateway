@@ -2,8 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   Activity, ArrowDown, ArrowUp, CheckCircle2, ChevronDown, ChevronRight, CircleX, Clock3,
-  Database, Gauge, House, LocateFixed, Network, Pause,
-  Pencil, Pin, Play, Plus, RefreshCw, Route, Search, Server, Settings, Trash2, X,
+  Database, Gauge, House, LayoutGrid, List, LocateFixed, LogOut, Network, Pause,
+  Pencil, Pin, Play, Plus, RefreshCw, Route, Search, Server, Settings, Trash2, TriangleAlert, X,
 } from '@lucide/vue'
 
 type Page = 'overview' | 'nodes' | 'rules' | 'resources' | 'runtime' | 'system'
@@ -55,6 +55,17 @@ interface GlobalNotification {
   id: number
   kind: 'success' | 'error'
   message: string
+}
+interface ActionDialogState {
+  kind: 'confirm' | 'prompt'
+  title: string
+  message: string
+  confirmLabel: string
+  cancelLabel: string
+  destructive: boolean
+  initialValue?: string
+  placeholder?: string
+  resolve: (value: boolean | string | null) => void
 }
 
 interface DelayResult {
@@ -138,6 +149,8 @@ interface RulesetPreset {
   name: string
   description: string
   url: string
+  category: string
+  source: string
 }
 interface RouteResult {
   domain: string
@@ -191,6 +204,10 @@ const page = ref<Page>(storedChoice('pdg-page', ['overview', 'nodes', 'rules', '
 const loading = ref(false)
 const error = ref('')
 const notifications = ref<GlobalNotification[]>([])
+const actionDialog = ref<ActionDialogState | null>(null)
+const actionDialogInput = ref('')
+const actionDialogElement = ref<HTMLDialogElement | null>(null)
+const actionDialogField = ref<HTMLInputElement | null>(null)
 const overview = ref<Overview | null>(null)
 const exits = ref<Exit[]>([])
 const rules = ref<Rule[]>([])
@@ -276,6 +293,7 @@ const expandedConnection = ref<string | null>(null)
 const subscriptionPreviewInput = ref('')
 const presetSubscriptionId = ref('')
 const presetRulesetTarget = ref('')
+const presetRulesetCategory = ref('all')
 
 watch(page, value => localStorage.setItem('pdg-page', value))
 watch(nodeWorkspace, value => localStorage.setItem('pdg-node-workspace', value))
@@ -582,15 +600,32 @@ const overridePresets: OverridePreset[] = [
   },
 ]
 const rulesetPresets: RulesetPreset[] = [
-  { name: 'OpenAI', description: 'ChatGPT、OpenAI API 与相关域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/OpenAI/OpenAI.list' },
-  { name: 'Telegram', description: 'Telegram 域名与 IP 网段', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Telegram/Telegram.list' },
-  { name: 'Netflix', description: 'Netflix 域名与流媒体 IP 网段', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Netflix/Netflix.list' },
-  { name: 'YouTube', description: 'YouTube 与 Google Video 相关域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/YouTube/YouTube.list' },
-  { name: 'GitHub', description: 'GitHub、GitHub API 与静态资源域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/GitHub/GitHub.list' },
-  { name: 'Apple 服务', description: 'Apple 中国区服务域名', url: 'https://raw.githubusercontent.com/DustinWin/ruleset_geodata/sing-box-ruleset/apple-cn.srs' },
-  { name: 'Microsoft 服务', description: 'Microsoft 中国区服务域名', url: 'https://raw.githubusercontent.com/DustinWin/ruleset_geodata/sing-box-ruleset/microsoft-cn.srs' },
-  { name: '游戏平台', description: '常用游戏平台及游戏下载域名', url: 'https://raw.githubusercontent.com/DustinWin/ruleset_geodata/sing-box-ruleset/games.srs' },
+  { name: 'AI 服务', category: 'AI', source: 'RealSeek', description: 'ChatGPT、Claude、Gemini、Grok、Perplexity 等 AI 服务', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/AI_no_ip.yaml' },
+  { name: 'Google 服务', category: '平台', source: 'blackmatrix7', description: 'Google、Google API、Android 和 FCM 相关域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Google/Google.list' },
+  { name: 'Telegram', category: '通信', source: 'RealSeek', description: 'Telegram 域名，适合本项目的 SNI 分流；不含客户端 IP 规则', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Telegram_no_ip.yaml' },
+  { name: 'Discord', category: '通信', source: 'blackmatrix7', description: 'Discord 应用、邀请、附件和 CDN 域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Discord/Discord.list' },
+  { name: 'Netflix', category: '影音', source: 'blackmatrix7', description: 'Netflix 域名与流媒体 IP 网段', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Netflix/Netflix.list' },
+  { name: 'YouTube', category: '影音', source: 'blackmatrix7', description: 'YouTube 与 Google Video 相关域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/YouTube/YouTube.list' },
+  { name: '流媒体', category: '影音', source: 'RealSeek', description: 'Twitch、Vimeo、Dailymotion 等更广泛的流媒体域名', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Stream_no_ip.yaml' },
+  { name: 'Emby', category: '影音', source: 'RealSeek', description: 'Emby 服务和常用媒体服务器域名', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Emby_no_ip.yaml' },
+  { name: 'Steam', category: '游戏', source: 'RealSeek', description: 'Steam 商店、社区和游戏下载域名', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Steam_no_ip.yaml' },
+  { name: 'Apple 国际服务', category: '平台', source: 'RealSeek', description: 'Apple 国际服务；按需指定代理出口', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Apple_no_ip.yaml' },
+  { name: 'Microsoft 国际服务', category: '平台', source: 'RealSeek', description: 'Microsoft、Office 及相关国际服务域名', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Microsoft_no_ip.yaml' },
+  { name: '下载服务', category: '下载/CDN', source: 'RealSeek', description: '常用下载站、对象存储和发布资源域名', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/Download_no_ip.yaml' },
+  { name: 'CDN 服务', category: '下载/CDN', source: 'RealSeek', description: 'Cloudflare、Fastly、Akamai 等 CDN 域名', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/PROXY/no_ip/CDN_no_ip.yaml' },
+  { name: 'GitHub', category: '开发', source: 'blackmatrix7', description: 'GitHub、GitHub API 与静态资源域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/GitHub/GitHub.list' },
+  { name: 'GitLab', category: '开发', source: 'blackmatrix7', description: 'GitLab SaaS、API 和容器资源域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/GitLab/GitLab.list' },
+  { name: 'Reddit', category: '社区', source: 'blackmatrix7', description: 'Reddit、媒体资源和邮件域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Reddit/Reddit.list' },
+  { name: 'Spotify', category: '影音', source: 'blackmatrix7', description: 'Spotify 音乐服务与媒体资源域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Spotify/Spotify.list' },
+  { name: 'X / Twitter', category: '社区', source: 'blackmatrix7', description: 'X、Twitter、图片和短链域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/Twitter/Twitter.list' },
+  { name: 'TikTok', category: '社区', source: 'blackmatrix7', description: 'TikTok 应用、API 和媒体域名', url: 'https://raw.githubusercontent.com/blackmatrix7/ios_rule_script/master/rule/Surge/TikTok/TikTok.list' },
+  { name: 'Apple CDN 例外', category: '直连例外', source: 'RealSeek', description: 'Apple CDN 域名；仅在需要单独指定直连出口时安装', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/DIRECT/no_ip/AppleCDN_no_ip.yaml' },
+  { name: 'Microsoft CDN 例外', category: '直连例外', source: 'RealSeek', description: 'Microsoft CDN 域名；仅在需要单独指定直连出口时安装', url: 'https://raw.githubusercontent.com/RealSeek/Clash_Rule_DIY/refs/heads/mihomo/DIRECT/no_ip/MicrosoftCDN_no_ip.yaml' },
 ]
+const rulesetPresetCategories = computed(() => ['all', ...new Set(rulesetPresets.map(item => item.category))])
+const visibleRulesetPresets = computed(() => rulesetPresets.filter(item => (
+  presetRulesetCategory.value === 'all' || item.category === presetRulesetCategory.value
+)))
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
@@ -633,6 +668,78 @@ function notify(message: string, kind: GlobalNotification['kind'], duration: num
 
 function flash(message: string) {
   notify(message, 'success', 3000)
+}
+
+function showActionDialog(state: Omit<ActionDialogState, 'resolve'>): Promise<boolean | string | null> {
+  if (actionDialog.value) return Promise.resolve(state.kind === 'confirm' ? false : null)
+  actionDialogInput.value = state.initialValue || ''
+  return new Promise(resolve => {
+    actionDialog.value = { ...state, resolve }
+    nextTick(() => {
+      if (!actionDialogElement.value?.open) actionDialogElement.value?.showModal()
+      if (state.kind === 'prompt') actionDialogField.value?.select()
+    })
+  })
+}
+
+async function requestConfirmation(options: {
+  title: string
+  message: string
+  confirmLabel?: string
+  destructive?: boolean
+}) {
+  const result = await showActionDialog({
+    kind: 'confirm',
+    title: options.title,
+    message: options.message,
+    confirmLabel: options.confirmLabel || '确认',
+    cancelLabel: '取消',
+    destructive: options.destructive || false,
+  })
+  return result === true
+}
+
+async function requestTextInput(options: {
+  title: string
+  message: string
+  initialValue?: string
+  placeholder?: string
+  confirmLabel?: string
+}) {
+  const result = await showActionDialog({
+    kind: 'prompt',
+    title: options.title,
+    message: options.message,
+    confirmLabel: options.confirmLabel || '保存',
+    cancelLabel: '取消',
+    destructive: false,
+    initialValue: options.initialValue,
+    placeholder: options.placeholder,
+  })
+  return typeof result === 'string' ? result : null
+}
+
+function settleActionDialog(value: boolean | string | null) {
+  const current = actionDialog.value
+  if (!current) return
+  if (actionDialogElement.value?.open) actionDialogElement.value.close()
+  actionDialog.value = null
+  current.resolve(value)
+}
+
+function cancelActionDialog() {
+  settleActionDialog(actionDialog.value?.kind === 'confirm' ? false : null)
+}
+
+function submitActionDialog() {
+  if (!actionDialog.value) return
+  if (actionDialog.value.kind === 'prompt') {
+    const value = actionDialogInput.value.trim()
+    if (!value) return
+    settleActionDialog(value)
+    return
+  }
+  settleActionDialog(true)
 }
 
 watch(error, message => {
@@ -763,7 +870,12 @@ async function removeExit(item: Exit) {
       impact.rules.length ? `迁移 ${impact.rules.length} 条分流引用` : '',
       impact.telegram ? 'Telegram 专用出口将跟随默认出口' : '',
     ].filter(Boolean).join('\n')
-    if (!window.confirm(`删除出口 ${item.tag}？\n${details || '没有发现配置引用'}`)) return
+    if (!await requestConfirmation({
+      title: `删除“${item.tag}”？`,
+      message: details || '没有发现配置引用。',
+      confirmLabel: '删除节点',
+      destructive: true,
+    })) return
     await api(`/api/v1/exits/${encodeURIComponent(item.tag)}`, { method: 'DELETE' })
     flash(`已删除 ${item.tag}`)
     await loadAll()
@@ -928,7 +1040,12 @@ async function refreshAllSubscriptions() {
 }
 
 async function removeNodeSubscription(item: Subscription) {
-  if (!window.confirm(`删除节点订阅 ${item.label}？\n将删除其 ${item.count} 个节点和分类组，引用会迁移到可用出口。`)) return
+  if (!await requestConfirmation({
+    title: `删除“${item.label}”？`,
+    message: `将删除其 ${item.count} 个节点和分类组，引用会迁移到可用出口。`,
+    confirmLabel: '删除订阅',
+    destructive: true,
+  })) return
   error.value = ''
   try {
     await api(`/api/v1/subscriptions/${encodeURIComponent(item.id)}`, { method: 'DELETE' })
@@ -964,7 +1081,12 @@ async function saveRule() {
 
 async function removeRule(item: Rule) {
   if (item.kind === 'ruleset') return
-  if (!window.confirm(`删除 ${item.label} 的分流规则？`)) return
+  if (!await requestConfirmation({
+    title: `删除“${item.label}”？`,
+    message: '这条分流规则将从当前配置中移除。',
+    confirmLabel: '删除规则',
+    destructive: true,
+  })) return
   error.value = ''
   try {
     const path = item.kind === 'cidr'
@@ -1073,7 +1195,12 @@ async function saveRuleset() {
 }
 
 async function updateRuleset(item: Ruleset, target?: string): Promise<boolean> {
-  const label = target === undefined ? window.prompt('规则集显示名称', item.label) : undefined
+  const label = target === undefined ? await requestTextInput({
+    title: '修改规则集名称',
+    message: '名称只影响管理界面中的显示。',
+    initialValue: item.label,
+    placeholder: '规则集名称',
+  }) : undefined
   if (target === undefined && label === null) return false
   const busyKey = `ruleset-${item.tag}`
   resourceBusy.value = busyKey
@@ -1155,7 +1282,12 @@ async function refreshRuleset(item: Ruleset) {
 }
 
 async function removeRuleset(item: Ruleset) {
-  if (!window.confirm(`删除规则集 ${item.label}？`)) return
+  if (!await requestConfirmation({
+    title: `删除“${item.label}”？`,
+    message: '规则集文件及其分流引用将被移除。',
+    confirmLabel: '删除规则集',
+    destructive: true,
+  })) return
   try {
     await api(`/api/v1/rulesets/${encodeURIComponent(item.tag)}`, { method: 'DELETE' })
     flash('规则集已删除')
@@ -1265,7 +1397,11 @@ async function checkProjectUpdate() {
 }
 
 async function startProjectUpdate() {
-  if (!window.confirm('确认后台执行 pdg update？服务会短暂重启，失败将自动回滚。')) return
+  if (!await requestConfirmation({
+    title: '更新 PrivDNS Gateway？',
+    message: '更新将在后台执行，服务会短暂重启；失败时会自动回滚。',
+    confirmLabel: '开始更新',
+  })) return
   try {
     await api('/api/v1/resources/project/update', { method: 'POST', body: '{}' })
     flash('更新任务已启动，请稍后重新连接')
@@ -1295,7 +1431,12 @@ function toggleConnectionDetails(id: string) {
 }
 
 async function closeConnection(id?: string) {
-  if (!id && !window.confirm('确认终止全部活动连接？')) return
+  if (!id && !await requestConfirmation({
+    title: '终止全部活动连接？',
+    message: '现有 TCP 与 UDP 会话会立即断开，客户端可能自动重新连接。',
+    confirmLabel: '全部终止',
+    destructive: true,
+  })) return
   try {
     await api(id ? `/api/v1/connections/${encodeURIComponent(id)}` : '/api/v1/connections', { method: 'DELETE' })
     if (!id || expandedConnection.value === id) expandedConnection.value = null
@@ -1370,6 +1511,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   if (runtimeTimer) window.clearInterval(runtimeTimer)
+  if (actionDialog.value) settleActionDialog(actionDialog.value.kind === 'confirm' ? false : null)
   for (const timer of notificationTimers.values()) window.clearTimeout(timer)
   notificationTimers.clear()
   window.removeEventListener('keydown', handleGlobalKeydown)
@@ -1386,6 +1528,28 @@ onBeforeUnmount(() => {
       <button :aria-label="`关闭通知：${item.message}`" title="关闭通知" @click="dismissNotification(item.id)"><X :size="17" /></button>
     </div>
   </div>
+
+  <dialog v-if="actionDialog" ref="actionDialogElement" class="action-dialog" @cancel.prevent="cancelActionDialog">
+    <form class="action-dialog-card" @submit.prevent="submitActionDialog">
+      <div class="action-dialog-icon" :class="{ destructive: actionDialog.destructive }" aria-hidden="true">
+        <Trash2 v-if="actionDialog.destructive" :size="22" />
+        <Pencil v-else-if="actionDialog.kind === 'prompt'" :size="22" />
+        <TriangleAlert v-else :size="22" />
+      </div>
+      <div class="action-dialog-copy">
+        <h2>{{ actionDialog.title }}</h2>
+        <p>{{ actionDialog.message }}</p>
+      </div>
+      <label v-if="actionDialog.kind === 'prompt'" class="action-dialog-field">
+        <span>名称</span>
+        <input ref="actionDialogField" v-model="actionDialogInput" :placeholder="actionDialog.placeholder" autocomplete="off" />
+      </label>
+      <div class="action-dialog-actions">
+        <button type="button" class="dialog-button cancel" @click="cancelActionDialog">{{ actionDialog.cancelLabel }}</button>
+        <button type="submit" class="dialog-button confirm" :class="{ destructive: actionDialog.destructive }" :disabled="actionDialog.kind === 'prompt' && !actionDialogInput.trim()">{{ actionDialog.confirmLabel }}</button>
+      </div>
+    </form>
+  </dialog>
 
   <main v-if="!token" class="login-shell">
     <section class="login-card">
@@ -1407,12 +1571,18 @@ onBeforeUnmount(() => {
         <div class="brand-mark small">PDG</div>
         <div><strong>PrivDNS</strong><span>Gateway</span></div>
       </div>
-      <nav>
-        <button v-for="item in navItems" :key="item.id" :class="{ active: page === item.id }" @click="selectPage(item.id)">
-          <component :is="item.icon" :size="19" />{{ item.label }}
+      <nav aria-label="主导航">
+        <button v-for="item in navItems" :key="item.id" :class="{ active: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)">
+          <component :is="item.icon" :size="19" /><span>{{ item.label }}</span>
         </button>
       </nav>
-      <button class="logout" @click="logout">退出管理端</button>
+      <div class="sidebar-footer">
+        <div class="gateway-state">
+          <span class="status-dot" :class="{ online: overview && activeServiceCount === Object.keys(overview.services).length }"></span>
+          <div><strong>{{ overview ? '网关已连接' : '正在连接' }}</strong><small>{{ resources?.project.current || '安全管理会话' }}</small></div>
+        </div>
+        <button class="logout" title="退出并清除本机令牌" @click="logout"><LogOut :size="18" /><span>退出管理端</span></button>
+      </div>
     </aside>
 
     <section class="content">
@@ -1421,7 +1591,7 @@ onBeforeUnmount(() => {
           <p class="eyebrow">PRIVDNS GATEWAY</p>
           <h1>{{ navItems.find(item => item.id === page)?.label }}</h1>
         </div>
-        <button class="icon-button" :disabled="loading" title="刷新当前页面" @click="refreshCurrentPage"><RefreshCw :size="19" /></button>
+        <button class="icon-button" :disabled="loading" aria-label="刷新当前页面" title="刷新当前页面" @click="refreshCurrentPage"><RefreshCw :size="19" :class="{ spinning: loading }" /></button>
       </header>
 
       <template v-if="page === 'overview' && overview">
@@ -1536,7 +1706,7 @@ onBeforeUnmount(() => {
             <div><p class="eyebrow">SUBSCRIPTIONS</p><h2>节点订阅</h2></div>
             <button class="secondary" :disabled="!subscriptions.length || Boolean(subscriptionBusy)" @click="refreshAllSubscriptions"><RefreshCw :size="15" :class="{ spinning: subscriptionBusy === 'all' }" />{{ subscriptionBusy === 'all' ? '刷新中' : '全部刷新' }}</button>
           </div>
-          <p v-if="!subscriptions.length" class="empty-state">尚未添加节点订阅</p>
+          <section v-if="!subscriptions.length" class="empty-state"><div class="empty-state-icon"><Database :size="26" /></div><strong>还没有节点订阅</strong><small>从上方“添加订阅”开始，填入订阅 URL 即可</small></section>
           <div v-else class="provider-grid">
             <article v-for="item in subscriptions" :key="item.id" class="provider-card" :class="{ degraded: item.last_error }">
               <div class="provider-head">
@@ -1628,10 +1798,10 @@ onBeforeUnmount(() => {
                 <span class="policy-node-delay" :class="{ busy: testingTags.includes(node.tag) }" @click.stop="testExits([node.tag])">{{ testingTags.includes(node.tag) ? '测试中' : delays[node.tag]?.ok ? `${delays[node.tag].delay} ms` : delays[node.tag] ? '失败' : '测速' }}</span>
                 <span v-if="node.deletable" class="policy-node-rename" title="修改节点名称" @click.stop="editNodeName(node)"><Pencil :size="14" /></span>
               </button>
-              <p v-if="!displayPolicyNodes.length" class="empty">没有匹配的节点</p>
+              <section v-if="!displayPolicyNodes.length" class="empty-state"><div class="empty-state-icon"><Search :size="26" /></div><strong>没有匹配的节点</strong><small>试试调整筛选或搜索关键词</small></section>
             </div>
           </div>
-          <p v-else class="empty">尚未创建策略组</p>
+          <section v-else class="empty-state"><div class="empty-state-icon"><Network :size="26" /></div><strong>还没有策略组</strong><small>点击“节点组”创建你的第一个策略组</small></section>
         </section>
         <section v-if="nodeWorkspace === 'nodes'" class="node-browser standalone">
           <div class="node-toolbar">
@@ -1645,8 +1815,8 @@ onBeforeUnmount(() => {
               <select v-model="nodeSourceFilter"><option value="all">全部来源</option><option v-for="item in subscriptions" :key="item.id" :value="item.id">{{ item.label }}</option></select>
               <select v-model="nodeSort"><option value="source">配置顺序</option><option value="name">名称排序</option><option value="delay">延迟排序</option></select>
               <button v-if="nodeFiltersActive" class="view-toggle clear-filter" @click="clearNodeFilters"><X :size="14" />清除</button>
-              <button class="view-toggle" :class="{ active: nodeView === 'list' }" @click="nodeView = 'list'">列表</button>
-              <button class="view-toggle" :class="{ active: nodeView === 'grid' }" @click="nodeView = 'grid'">卡片</button>
+              <button class="view-toggle" :class="{ active: nodeView === 'list' }" aria-label="列表视图" title="列表视图" @click="nodeView = 'list'"><List :size="16" /></button>
+              <button class="view-toggle" :class="{ active: nodeView === 'grid' }" aria-label="卡片视图" title="卡片视图" @click="nodeView = 'grid'"><LayoutGrid :size="16" /></button>
             </div>
           </div>
           <div v-if="activeNodeGroup" class="active-group-bar">
@@ -1674,7 +1844,7 @@ onBeforeUnmount(() => {
                 <button v-if="item.deletable" class="text-danger" title="删除节点" @click="removeExit(item)"><Trash2 :size="15" /></button>
               </div>
             </article>
-            <p v-if="!visibleNodes.length" class="empty">没有匹配的节点</p>
+            <section v-if="!visibleNodes.length" class="empty-state"><div class="empty-state-icon"><Search :size="26" /></div><strong>没有匹配的节点</strong><small>调整筛选或搜索条件试试</small></section>
           </div>
         </section>
       </template>
@@ -1743,7 +1913,7 @@ onBeforeUnmount(() => {
                   <div><button v-for="node in nodesForGroup(ruleTargetGroup(item)!).slice(0, 60)" :key="node.tag" :class="[{ selected: ruleTargetGroup(item)?.selected === node.tag }, delayTone(node.tag)]" @click="setGroupSelection(ruleTargetGroup(item)!, node.tag)"><span v-if="nodeNameParts(node.tag).flag" class="node-flag">{{ nodeNameParts(node.tag).flag }}</span><strong>{{ nodeNameParts(node.tag).name }}</strong><small>{{ delays[node.tag]?.ok ? `${delays[node.tag].delay} ms` : delays[node.tag] ? '失败' : '未测' }}</small></button></div>
                 </div>
               </article>
-              <p v-if="!filteredRules.length" class="empty">没有匹配的分流规则</p>
+              <section v-if="!filteredRules.length" class="empty-state"><div class="empty-state-icon"><Search :size="26" /></div><strong>没有匹配的分流规则</strong><small>清除筛选或搜索条件即可看到全部规则</small></section>
             </div>
           </section>
         </template>
@@ -1764,7 +1934,7 @@ onBeforeUnmount(() => {
               <label>目标策略<select :value="item.target" @change="rulesetTargetChange(item, $event)"><option v-for="exit in exits" :key="exit.tag" :value="exit.tag">{{ exit.tag }}</option></select></label>
               <div class="provider-actions"><button @click="updateRuleset(item)">改名</button><button @click="refreshRuleset(item)">刷新</button><button class="text-danger" @click="removeRuleset(item)">删除</button></div>
             </article>
-            <p v-if="!rulesets.length" class="empty">尚未添加规则集</p>
+            <section v-if="!rulesets.length" class="empty-state"><div class="empty-state-icon"><Route :size="26" /></div><strong>还没有远程规则集</strong><small>在上方填写 URL 与目标策略即可下载</small></section>
           </section>
         </template>
       </template>
@@ -1807,10 +1977,10 @@ onBeforeUnmount(() => {
             <div><p class="eyebrow">MY RULESETS</p><h2>我的规则集</h2></div>
             <button class="primary compact" @click="showRulesetComposer = !showRulesetComposer"><Plus :size="15" />添加规则集</button>
           </div>
-          <p class="preset-intro">只需填写名称、规则集 URL 和目标策略。系统会先下载校验，成功后才应用，失败不会影响现有配置。</p>
+          <p class="preset-intro">只需填写名称、规则集 URL 和目标策略。系统会先下载校验，成功后才应用，失败不会影响现有配置；推荐目录聚焦国外服务的二次分流，不重复国内/国际基础路由。</p>
           <div v-if="showRulesetComposer" class="simple-resource-form ruleset-simple-form">
             <label><span>名称</span><input v-model="rulesetLabel" placeholder="例如：流媒体" /></label>
-            <label><span>规则集 URL</span><input v-model="rulesetUrl" type="url" placeholder="https://example.com/rules.srs" /></label>
+            <label><span>规则集 URL</span><input v-model="rulesetUrl" type="url" placeholder="https://example.com/rules.list 或 rules.yaml" /></label>
             <label><span>目标策略</span><select v-model="rulesetTarget"><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }}</option></select></label>
             <button class="primary" :disabled="!rulesetUrl.trim() || !rulesetTarget" @click="saveRuleset">下载并应用</button>
           </div>
@@ -1821,12 +1991,18 @@ onBeforeUnmount(() => {
               <div class="managed-resource-actions"><button title="修改名称" @click="updateRuleset(item)">改名</button><button title="重新下载" @click="refreshRuleset(item)">刷新</button><button class="text-danger" title="删除规则集" @click="removeRuleset(item)">删除</button></div>
             </article>
           </div>
-          <p v-else class="empty-state">还没有自定义规则集，点击“添加规则集”即可开始。</p>
+          <section v-else class="empty-state"><div class="empty-state-icon"><Route :size="26" /></div><strong>还没有自定义规则集</strong><small>点击“添加规则集”开始你的第一次配置</small></section>
           <div class="resource-subheading"><div><span>推荐规则集</span><small>选择目标策略后可一键安装</small></div></div>
-          <label class="preset-target">目标策略<select v-model="presetRulesetTarget"><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }}</option></select></label>
+          <div class="preset-toolbar">
+            <label class="preset-target">目标策略<select v-model="presetRulesetTarget"><option v-for="item in exits" :key="item.tag" :value="item.tag">{{ item.tag }}</option></select></label>
+            <label class="preset-target">规则类别<select v-model="presetRulesetCategory"><option v-for="category in rulesetPresetCategories" :key="category" :value="category">{{ category === 'all' ? '全部类别' : category }}</option></select></label>
+          </div>
           <div class="preset-grid ruleset-presets">
-            <article v-for="preset in rulesetPresets" :key="preset.name" class="preset-card">
-              <div><strong>{{ preset.name }}</strong><p>{{ preset.description }}</p></div>
+            <article v-for="preset in visibleRulesetPresets" :key="preset.name" class="preset-card">
+              <div>
+                <div class="preset-meta"><span>{{ preset.category }}</span><small>{{ preset.source }}</small></div>
+                <strong>{{ preset.name }}</strong><p>{{ preset.description }}</p>
+              </div>
               <button class="secondary" :disabled="resourceBusy === `preset-${preset.name}`" @click="installRulesetPreset(preset)">一键安装</button>
             </article>
           </div>
@@ -1885,7 +2061,7 @@ onBeforeUnmount(() => {
               <div class="connection-main">
                 <button class="connection-expand" :title="expandedConnection === item.id ? '收起详情' : '展开详情'" @click="toggleConnectionDetails(item.id)"><ChevronDown v-if="expandedConnection === item.id" :size="17" /><ChevronRight v-else :size="17" /></button>
                 <div class="connection-identity"><strong>{{ item.host }}</strong><span>{{ item.source || '本机' }}<template v-if="item.source_port">:{{ item.source_port }}</template> · {{ connectionDuration(item) }}</span></div>
-                <div class="connection-tags"><span>{{ (item.network || '?').toUpperCase() }}</span><span>{{ item.type || 'UNKNOWN' }}</span></div>
+                <div class="connection-tags"><span :class="['tag-net', item.network || 'unknown']">{{ (item.network || '?').toUpperCase() }}</span><span class="tag-type">{{ item.type || 'UNKNOWN' }}</span></div>
                 <div class="connection-bytes"><span><ArrowUp :size="13" />{{ formatBytes(item.upload) }}</span><span><ArrowDown :size="13" />{{ formatBytes(item.download) }}</span></div>
                 <button class="connection-close" title="终止连接" @click="closeConnection(item.id)"><X :size="16" /></button>
               </div>
@@ -1896,7 +2072,7 @@ onBeforeUnmount(() => {
                 <div><span>流量</span><dl><dt>上传</dt><dd>{{ formatBytes(item.upload) }}</dd><dt>下载</dt><dd>{{ formatBytes(item.download) }}</dd><dt>持续时间</dt><dd>{{ connectionDuration(item) }}</dd></dl></div>
               </div>
             </article>
-            <p v-if="runtime && !filteredConnections.length" class="empty">{{ runtime.connections.length ? '没有匹配的连接' : '当前没有活动连接' }}</p>
+            <section v-if="runtime && !filteredConnections.length" class="empty-state"><div class="empty-state-icon"><Activity :size="26" /></div><strong>{{ runtime.connections.length ? '没有匹配的连接' : '暂无活动连接' }}</strong><small>{{ runtime.connections.length ? '调整筛选或清除搜索条件' : '新连接产生时会自动出现在这里' }}</small></section>
           </div>
         </section>
       </template>
@@ -1924,9 +2100,9 @@ onBeforeUnmount(() => {
       </template>
     </section>
 
-    <nav class="mobile-nav">
-      <button v-for="item in navItems" :key="item.id" :class="{ active: page === item.id }" @click="selectPage(item.id)">
-        <component :is="item.icon" :size="19" />{{ item.label }}
+    <nav class="mobile-nav" aria-label="主导航">
+      <button v-for="item in navItems" :key="item.id" :class="{ active: page === item.id }" :aria-current="page === item.id ? 'page' : undefined" @click="selectPage(item.id)">
+        <component :is="item.icon" :size="19" /><span>{{ item.label }}</span>
       </button>
     </nav>
   </div>

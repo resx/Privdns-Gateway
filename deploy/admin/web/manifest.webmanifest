@@ -4,8 +4,8 @@
   "description": "PrivDNS Gateway 内网管理端",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#090b0e",
-  "theme_color": "#0d0f12",
+  "background_color": "#f2f2f7",
+  "theme_color": "#f2f2f7",
   "icons": [
     {
       "src": "/icon-192.png",

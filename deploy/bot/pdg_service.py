@@ -1275,6 +1275,8 @@ class GatewayService:
             line = raw.split("#", 1)[0].strip()
             if not line or line.startswith("//"):
                 continue
+            # 兼容 Surge list 和 Clash classical provider 的 payload 列表。
+            line = re.sub(r"^-\s*", "", line)
             parts = [part.strip() for part in line.split(",")]
             kind = parts[0].upper()
             if len(parts) < 2:
