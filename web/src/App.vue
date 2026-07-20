@@ -1520,14 +1520,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="notification-region" aria-live="polite" aria-atomic="false">
+  <TransitionGroup tag="div" name="notify" class="notification-region" aria-live="polite" aria-atomic="false">
     <div v-for="item in notifications" :key="item.id" class="global-notification" :class="item.kind" :role="item.kind === 'error' ? 'alert' : 'status'">
       <CircleX v-if="item.kind === 'error'" :size="19" />
       <CheckCircle2 v-else :size="19" />
       <span>{{ item.message }}</span>
       <button :aria-label="`关闭通知：${item.message}`" title="关闭通知" @click="dismissNotification(item.id)"><X :size="17" /></button>
     </div>
-  </div>
+  </TransitionGroup>
 
   <dialog v-if="actionDialog" ref="actionDialogElement" class="action-dialog" @cancel.prevent="cancelActionDialog">
     <form class="action-dialog-card" @submit.prevent="submitActionDialog">
@@ -1629,6 +1629,20 @@ onBeforeUnmount(() => {
           <div class="section-title"><div><p class="eyebrow">SERVICES</p><h2>服务状态</h2></div><button class="secondary compact" @click="selectPage('system')">运行管理 <ChevronRight :size="15" /></button></div>
           <div class="service-list"><div v-for="(value, name) in overview.services" :key="name"><span class="status-dot" :class="{ online: serviceActive(value) }"></span><strong>{{ name }}</strong><span class="muted">{{ value }}</span></div></div>
         </section>
+      </template>
+
+      <template v-if="page === 'overview' && !overview && loading">
+        <section class="skeleton-strip" aria-hidden="true">
+          <div v-for="n in 4" :key="n"><span class="skeleton skeleton-dot"></span><span class="skeleton skeleton-line short"></span><span class="skeleton skeleton-line"></span></div>
+        </section>
+        <section class="skeleton-primary" aria-hidden="true">
+          <article class="panel skeleton-panel"><span class="skeleton skeleton-line short"></span><span class="skeleton skeleton-line title"></span><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-block"></span></article>
+          <article class="panel skeleton-panel"><span class="skeleton skeleton-line short"></span><span class="skeleton skeleton-line title"></span><span class="skeleton skeleton-line"></span><span class="skeleton skeleton-block"></span></article>
+        </section>
+        <section class="skeleton-strip metrics" aria-hidden="true">
+          <article v-for="n in 4" :key="n"><span class="skeleton skeleton-line short"></span><span class="skeleton skeleton-line title"></span></article>
+        </section>
+        <p class="skeleton-status" role="status">正在连接网关…</p>
       </template>
 
       <template v-if="page === 'nodes'">
@@ -2056,7 +2070,7 @@ onBeforeUnmount(() => {
         </section>
         <section class="panel connection-workbench">
           <div class="section-title connection-heading"><div><p class="eyebrow">ACTIVE CONNECTIONS</p><h2>连接清单 <span class="muted">{{ filteredConnections.length }}</span></h2></div><span class="refresh-state" :class="{ paused: runtimePaused }">{{ runtimePaused ? '已暂停' : '自动刷新' }} · {{ runtimeUpdatedAt ? runtimeUpdatedAt.toLocaleTimeString('zh-CN', { hour12: false }) : '等待数据' }}</span></div>
-          <div class="connection-list">
+          <TransitionGroup tag="div" name="conn" class="connection-list">
             <article v-for="item in filteredConnections" :key="item.id" class="connection-item" :class="{ expanded: expandedConnection === item.id }">
               <div class="connection-main">
                 <button class="connection-expand" :title="expandedConnection === item.id ? '收起详情' : '展开详情'" @click="toggleConnectionDetails(item.id)"><ChevronDown v-if="expandedConnection === item.id" :size="17" /><ChevronRight v-else :size="17" /></button>
@@ -2072,8 +2086,8 @@ onBeforeUnmount(() => {
                 <div><span>流量</span><dl><dt>上传</dt><dd>{{ formatBytes(item.upload) }}</dd><dt>下载</dt><dd>{{ formatBytes(item.download) }}</dd><dt>持续时间</dt><dd>{{ connectionDuration(item) }}</dd></dl></div>
               </div>
             </article>
-            <section v-if="runtime && !filteredConnections.length" class="empty-state"><div class="empty-state-icon"><Activity :size="26" /></div><strong>{{ runtime.connections.length ? '没有匹配的连接' : '暂无活动连接' }}</strong><small>{{ runtime.connections.length ? '调整筛选或清除搜索条件' : '新连接产生时会自动出现在这里' }}</small></section>
-          </div>
+          </TransitionGroup>
+          <section v-if="runtime && !filteredConnections.length" class="empty-state"><div class="empty-state-icon"><Activity :size="26" /></div><strong>{{ runtime.connections.length ? '没有匹配的连接' : '暂无活动连接' }}</strong><small>{{ runtime.connections.length ? '调整筛选或清除搜索条件' : '新连接产生时会自动出现在这里' }}</small></section>
         </section>
       </template>
 
