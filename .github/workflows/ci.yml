@@ -1,170 +1,27 @@
 name: CI
 
-# 纯静态校验: 不启动 mosdns / sing-box / nftables, 只检查能不能编译 / 语法 / 渲染。
+# Day-to-day gate on every branch push (tags are handled by release.yml) and
+# every pull request. Delegates to the reusable checks.yml so CI and the release
+# gate stay identical.
+#
+# NOTE: `branches: ['**']` (not `tags-ignore`) is the correct "all branches, no
+# tags" filter — a `push` trigger that specifies only `tags`/`tags-ignore` and
+# no `branches` runs ONLY on tag pushes, so it would never fire on a branch.
 on:
   push:
-    branches: [main]
+    branches:
+      - '**'
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# One in-flight run per ref; a newer push cancels the older run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Python 语法 (py_compile)
-        run: python3 -m py_compile deploy/bot/*.py deploy/admin/*.py deploy/ios/*.py tests/*.py
-
-      - name: Shell 语法 (bash -n)
-        run: |
-          bash -n install.sh uninstall.sh \
-            deploy/bot/*.sh deploy/cert/*.sh lib/*.sh
-
-      - name: JSON 模板渲染后可解析
-        run: |
-          set -euo pipefail
-          render() {
-            sed -e 's|__SERVER_IP__|203.0.113.1|g' \
-                -e 's|__INTERNAL_CIDR__|172.22.0.0/16|g' \
-                -e 's|__CERT_DIR__|/etc/mosdns/certs|g' \
-                -e 's|__SSH_PORT__|22|g' "$1"
-          }
-          for t in deploy/singbox/config.json.tmpl; do
-            echo "→ 渲染并校验 $t"
-            render "$t" | python3 -m json.tool > /dev/null
-            # jq 在 ubuntu-latest 默认就有, 再用它复核一遍
-            if command -v jq >/dev/null; then render "$t" | jq -e . > /dev/null; fi
-            echo "  OK"
-          done
-
-      - name: PWA 类型检查、构建与部署产物一致性
-        run: |
-          npm ci --prefix web
-          npm run build --prefix web
-          diff -qr web/dist deploy/admin/web
-
-      - name: mobileconfig 模板是合法 plist/XML
-        run: |
-          python3 - <<'PY'
-          import plistlib, glob, sys
-          ok = True
-          for f in glob.glob("deploy/ios/*.mobileconfig.tmpl"):
-              try:
-                  plistlib.load(open(f, "rb")); print("  OK", f)
-              except Exception as e:
-                  print("  FAIL", f, e); ok = False
-          sys.exit(0 if ok else 1)
-          PY
-
-      - name: systemd unit 静态检查 (best-effort, 不阻断)
-        continue-on-error: true
-        run: |
-          if command -v systemd-analyze >/dev/null; then
-            systemd-analyze verify \
-              deploy/bot/pdg-bot.service deploy/bot/pdg-health.service \
-              deploy/bot/pdg-rules-update.service deploy/bot/pdg-health.timer \
-              deploy/bot/pdg-rules-update.timer deploy/ios/pdg-probe81.service \
-              deploy/ios/pdg-ios-profile.socket deploy/ios/pdg-ios-profile@.service \
-              deploy/ios/pdg-ios-profile-sync.service deploy/ios/pdg-ios-profile-cleanup.service \
-              deploy/ios/pdg-ios-profile-cleanup.timer \
-              deploy/admin/pdg-admin.service || true
-            echo "(CI 环境缺二进制/路径, 上面的告警多为预期; 重点看指令拼写/语法错)"
-          else
-            echo "systemd-analyze 不可用, 跳过"
-          fi
-
-      - name: "ShellCheck (阻断: 有 warning 即失败)"
-        run: |
-          command -v shellcheck >/dev/null || sudo apt-get install -y -q shellcheck
-          shellcheck --severity=warning -e SC1091 \
-            install.sh uninstall.sh deploy/bot/*.sh deploy/cert/*.sh lib/*.sh tests/*.sh
-
-      - name: "安装与卸载生命周期一致性回归"
-        run: bash tests/test-uninstall.sh
-
-      - name: "防火墙迁移识别回归 (原装应迁移 / 自定义应跳过)"
-        run: bash tests/test-fw-migration.sh
-
-      - name: "mosdns concurrent 迁移回归 (单上游=1/多上游=2/幂等)"
-        run: bash tests/test-mosdns-concurrent.sh
-
-      - name: "GMS 推送端口迁移回归 (fw/sing-box 补 5228-5230, 自定义跳过, 失败回滚)"
-        run: bash tests/test-gms-migration.sh
-
-      - name: "parse_link 多协议回归 (各协议链接 + Surge ss 行字段映射)"
-        run: python3 tests/test-parse-links.py
-
-      - name: "发布链路回归 (tag-only 安装/更新 + 文档版本)"
-        run: bash tests/test-release-flow.sh
-
-      - name: "bot 导航回归 (操作结果不刷一级菜单)"
-        run: python3 tests/test-bot-nav.py
-
-      - name: "bot Telegram 传输回归 (轮询/API 连接隔离 + 断线重连)"
-        run: python3 tests/test-bot-transport.py
-
-      - name: "配置控制事务回归 (锁/校验/原子应用/回滚)"
-        run: python3 tests/test-pdg-control.py
-
-      - name: "管理业务服务回归 (出口/分流 CRUD)"
-        run: python3 tests/test-pdg-service.py
-
-      - name: "管理 API 回归 (鉴权/路由/安全响应头)"
-        run: python3 tests/test-admin-api.py
-
-      - name: "管理端部署回归 (9443/令牌/systemd)"
-        run: bash tests/test-admin-deploy.sh
-
-      - name: "bot 出口交互回归 (预览确认/删除影响/输入重试)"
-        run: python3 tests/test-bot-control-ux.py
-
-      - name: "bot iOS 二维码/文件回归"
-        run: python3 tests/test-bot-ios.py
-
-      - name: "bot 测域名规则集显示名回归"
-        run: python3 tests/test-domain-label.py
-
-      - name: "出口改名级联回归 (规则/策略组/final/TG 同步)"
-        run: python3 tests/test-exit-rename.py
-
-      - name: "Bot 状态与出口信息回归"
-        run: python3 tests/test-bot-status.py
-
-      - name: "用户手动分流规则优先级回归"
-        run: python3 tests/test-rule-priority.py
-
-      - name: "iOS 描述文件回归 (Wi-Fi 探测判定 + SSID 直连名单)"
-        run: python3 tests/test-ios-ssid.py
-
-      - name: "iOS 常驻下载服务与安装二维码回归"
-        run: |
-          python3 tests/test-ios-profile-http.py
-          bash tests/test-ios-deploy.sh
-
-      - name: "自检防火墙端口回归"
-        run: python3 tests/test-doctor-firewall.py
-
-      - name: "CLI/report/bot 杂项回归 (rollback 校验/inet pdg/菜单 exec)"
-        run: python3 tests/test-maintenance-polish.py
-
-  functional:
-    # 真功能测试: 下载钉死 SHA256 的 sing-box / mosdns, 真起一遍, 验证两层核心链路。
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - name: 流量层 (真起 sing-box 验证按 SNI 分到不同出口 + final 兜底)
-        run: bash tests/functional-test.sh
-      - name: DNS 层 (真起 mosdns 验证 A 劫持 / AAAA·HTTPS 置空 / 国内直连 / 按来源门控)
-        run: bash tests/dns-policy-test.sh
-      - name: 出站 schema (锁定版 sing-box check 各协议 parse_link 输出)
-        run: bash tests/test-outbound-schema.sh
+  checks:
+    uses: ./.github/workflows/checks.yml

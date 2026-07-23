@@ -1,17 +1,15 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)" />
-    <meta name="description" content="PrivDNS Gateway 管理端" />
-    <link rel="manifest" href="/manifest.webmanifest" />
-    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
-    <title>PrivDNS Gateway</title>
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#f8fafd" />
+    <title>5GPN Console</title>
+    <script src="/theme-init.js"></script>
   </head>
   <body>
-    <div id="app"></div>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

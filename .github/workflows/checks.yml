@@ -1,0 +1,190 @@
+name: Checks
+
+# Reusable gate: the single source of truth for "is this tree shippable?".
+# Called by ci.yml (every branch push / PR) AND by release.yml (SemVer tags), so
+# the release gate is byte-identical to day-to-day CI and the two can never
+# drift. Do not add checks to ci.yml or release.yml directly — add them here.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # Zero-dependency shell gate: every operator-facing entrypoint must parse
+  # (bash -n) and pass the pure-grep policy tests (no Python / Go / node needed).
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: bash -n syntax gate
+        run: |
+          set -euo pipefail
+          for s in install.sh quick-install.sh scripts/*.sh; do
+            echo "--- bash -n $s ---"; bash -n "$s"
+          done
+      - name: Shell policy tests
+        run: |
+          set -euo pipefail
+          for t in tests/test_*.sh; do
+            echo "--- $t ---"; bash "$t"
+          done
+
+  # Go gate: gofmt-clean + vet + the full suite under the race detector (ubuntu
+  # runners ship gcc, so -race works). Catches the concurrent control-server /
+  # subscription-manager / resolver-pool races the non-race suite misses.
+  go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cmd/5gpn-dns
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: cmd/5gpn-dns/go.mod
+          cache-dependency-path: cmd/5gpn-dns/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"
+            echo "Run: gofmt -w cmd/5gpn-dns"; exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  intercept-go:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cmd/5gpn-intercept
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: cmd/5gpn-intercept/go.mod
+          cache-dependency-path: cmd/5gpn-intercept/go.sum
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"; echo "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+      - name: go test -race
+        run: go test -race ./...
+
+  # Web gate: unit tests, production build, explicit bundle budgets, and the
+  # real-browser desktop + 390x844 mobile suites under production CSP.
+  # (npm run build == tsc && vite build; tsconfig includes tests, so this
+  # type-checks the whole SPA). The release workflow runs the same build to
+  # produce the 5gpn-web tarball.
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Unit tests (vitest)
+        run: npx vitest run
+      - name: Type-check + build
+        run: npm run build
+      - name: Bundle budgets
+        run: npm run bundle:check
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Browser E2E (desktop + mobile)
+        run: npx playwright test
+
+  # Validate the committed seed and the optional ingress-module candidate with
+  # the exact pinned data-plane binary. The digest prevents a mutable upstream
+  # artifact from changing this gate.
+  mihomo-config:
+    runs-on: ubuntu-latest
+    env:
+      MIHOMO_VERSION: v1.19.28
+      MIHOMO_SHA256: 70d01cfb8cb7bf7a92fd1af16cb4b9553d90bb4eecde3b5c4849103e27c80ddb
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Download pinned mihomo
+        run: |
+          set -euo pipefail
+          url="https://github.com/MetaCubeX/mihomo/releases/download/${MIHOMO_VERSION}/mihomo-linux-amd64-compatible-${MIHOMO_VERSION}.gz"
+          curl -fsSL "$url" -o /tmp/mihomo.gz
+          echo "${MIHOMO_SHA256}  /tmp/mihomo.gz" | sha256sum -c -
+          gunzip /tmp/mihomo.gz
+          chmod 0755 /tmp/mihomo
+      - name: Render and validate ingress and interception module configs
+        run: |
+          set -euo pipefail
+          runtime="$(mktemp -d)"
+          trap 'rm -rf "$runtime"' EXIT
+          awk '
+            $0 == "__MIHOMO_LISTENERS__" {
+              print "  - {name: gateway, type: tunnel, listen: 203.0.113.10, port: 443, network: [tcp, udp], target: console.example.test:443}"
+              print "  - {name: gateway80, type: tunnel, listen: 203.0.113.10, port: 80, network: [tcp], target: console.example.test:80}"
+              print "  - {name: gateway8080, type: tunnel, listen: 203.0.113.10, port: 8080, network: [tcp], target: console.example.test:8080}"
+              print "  - {name: gateway8443, type: tunnel, listen: 203.0.113.10, port: 8443, network: [tcp], target: console.example.test:8443}"
+              print "  - {name: gateway5060, type: tunnel, listen: 203.0.113.10, port: 5060, network: [tcp, udp], target: console.example.test:5060}"
+              next
+            }
+            {
+              gsub(/__GATEWAY_IP__/, "10.0.0.1")
+              gsub(/__CONSOLE_DOMAIN__/, "console.example.test")
+              gsub(/__ZASH_DOMAIN__/, "zash.example.test")
+              gsub(/__CONTROLLER_SECRET__/, "ci-controller-secret")
+              gsub(/__INTERCEPT_INBOUND_USERNAME__/, "ci-module-inbound-user")
+              gsub(/__INTERCEPT_INBOUND_PASSWORD__/, "ci-module-inbound-password-123456")
+              gsub(/__INTERCEPT_UPSTREAM_USERNAME__/, "ci-module-upstream-user")
+              gsub(/__INTERCEPT_UPSTREAM_PASSWORD__/, "ci-module-upstream-password-123456")
+              print
+            }
+          ' etc/mihomo/config.yaml.tmpl > "$runtime/config.yaml"
+          printf '127.0.0.1/32\n' > "$runtime/whitelist.txt"
+          if grep -Eq '__[A-Z0-9_]+__' "$runtime/config.yaml"; then
+            echo "unresolved mihomo template placeholder" >&2
+            exit 1
+          fi
+          /tmp/mihomo -t -f "$runtime/config.yaml" -d "$runtime"
+          /tmp/mihomo -t -f tests/fixtures/stable-0.0.13/mihomo-config.yaml -d "$runtime"
+          grep -Fq 'name: gateway5060' "$runtime/config.yaml"
+          grep -Fq 'target: console.example.test:5060' "$runtime/config.yaml"
+          grep -Fq 'QUIC: { ports: [443, 5060] }' "$runtime/config.yaml"
+          grep -Fq 'AND,((DOMAIN,console.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
+          grep -Fq 'AND,((DOMAIN,zash.example.test),(DST-PORT,5060)),REJECT' "$runtime/config.yaml"
+          grep -Fq 'name: intercept-egress' "$runtime/config.yaml"
+          grep -Fq 'name: MODULE-INTERCEPT' "$runtime/config.yaml"
+          grep -Fq 'IN-NAME,intercept-egress,REJECT' "$runtime/config.yaml"
+          sed '/  - IN-NAME,intercept-egress,REJECT/i\  - AND,((IN-NAME,intercept-egress),(DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),Proxies' \
+            "$runtime/config.yaml" \
+            | sed '/  - MATCH,Proxies/i\  - DOMAIN,ads.example.test,REJECT\n  - OR,((DOMAIN-KEYWORD,ads),(DOMAIN-KEYWORD,tracker)),REJECT\n  - AND,((DOMAIN-SUFFIX,chat.example.test),(OR,((DOMAIN-KEYWORD,stun),(DOMAIN-KEYWORD,tracker)))),REJECT\n  - AND,((DOMAIN-SUFFIX,assets.example.test),(DOMAIN-KEYWORD,tnc),(NETWORK,UDP),(DST-PORT,443)),DIRECT\n  - IP-CIDR,203.0.113.7/32,REJECT,no-resolve\n  - IP-CIDR6,2001:db8::/32,DIRECT,no-resolve\n  - AND,((DOMAIN,api.example.test),(DST-PORT,443)),MODULE-INTERCEPT\n  - AND,((DOMAIN-WILDCARD,*.cdn.example.test),(DST-PORT,443)),MODULE-INTERCEPT\n  - AND,((DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),MODULE-INTERCEPT' \
+            > "$runtime/config-module-enabled.yaml"
+          grep -Fq 'AND,((IN-NAME,intercept-egress),(DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),Proxies' "$runtime/config-module-enabled.yaml"
+          grep -Fq 'AND,((DOMAIN-SUFFIX,compact.example.test),(DST-PORT,443)),MODULE-INTERCEPT' "$runtime/config-module-enabled.yaml"
+          /tmp/mihomo -t -f "$runtime/config-module-enabled.yaml" -d "$runtime"
+          sed \
+            -e '/name: gateway5060/d' \
+            -e 's/, 5060//g' \
+            -e '/DST-PORT,5060/d' \
+            "$runtime/config.yaml" > "$runtime/config-speedtest-5060-disabled.yaml"
+          ! grep -Fq '5060' "$runtime/config-speedtest-5060-disabled.yaml"
+          /tmp/mihomo -t -f "$runtime/config-speedtest-5060-disabled.yaml" -d "$runtime"
+          bash tests/mihomo-compact-suffix-regression.sh /tmp/mihomo
+      - name: Exercise sniff-cache isolation
+        run: bash tests/mihomo-sniff-cache-regression.sh /tmp/mihomo

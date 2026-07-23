@@ -1,0 +1,36 @@
+# 5gpn-unit-id: 5gpn-intercept-cert.service:v1
+[Unit]
+Description=Publish the module-scoped 5gpn interception leaf
+After=local-fs.target
+# The manager can republish one unchanged candidate every 500 ms for at most
+# 15 seconds to recover a coalesced PathChanged event. Keep that bounded retry
+# inside systemd's guard without inheriting the default five-start burst.
+StartLimitIntervalSec=30
+StartLimitBurst=64
+
+[Service]
+Type=oneshot
+ExecStart=/opt/5gpn/scripts/intercept-cert-renew.sh
+User=root
+Group=root
+SupplementaryGroups=gpn-intercept
+UMask=0077
+RuntimeDirectory=5gpn
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_UNIX
+ReadWritePaths=/etc/5gpn/intercept /run/5gpn
+ReadOnlyPaths=/etc/5gpn/intercept-ca /opt/5gpn/bin/5gpn-intercept /opt/5gpn/scripts/intercept-cert-renew.sh

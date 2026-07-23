@@ -1,26 +1,31 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.eggs/
-build/
-dist/
-.venv/
-venv/
-node_modules/
-.local/
 
-# pdg 运行期数据 (对应 /var/lib/pdg, /var/log/pdg)
-/var/
+# Editor / OS
+*.swp
+*~
+.DS_Store
+
+# Local scratch / temp
+/.local/
+*.tmp
 *.log
 
-# 生成的配置产物 (本地试编译时)
-/out/
-*.generated.lua
-*.generated.json
+# Go build outputs (5gpn-dns is built in CI / cross-compiled; never commit binaries)
+/cmd/5gpn-dns/5gpn-dns
+/cmd/5gpn-dns/5gpn-dns.exe
+*.exe
 
-# 机密: 真实 IP / 密码 / 证书不要进版本库
-config/pdg.local.conf
-*.pem
-*.key
-tls/
+# Local build/staging scratch (cross-compiled binary + web tarballs for test-env deploys)
+/build/
+
+# Frontend build output (Phase 3 web UI; built in CI)
+/web/node_modules/
+/web/dist/
+
+# Visual-companion brainstorm mockups (scratch, not committed)
+/.superpowers/brainstorm/
+
+# Isolated feature worktrees
+/.worktrees/

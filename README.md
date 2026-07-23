@@ -1,141 +1,505 @@
-# PrivDNS Gateway
+# 5gpn
 
-**面向专用移动网络的私密 DNS 流量治理网关**。终端只需配置系统私密 DNS(DoT),网关根据域名策略将业务流量调度到指定出口或本机直连。
+**基于自研 Go 守护进程 `5gpn-dns` 的中国线路 DNS/SNI 网关。** 核心是"**解析即策略**"——用 DNS 解析结果决定一条流量由客户端直连还是先进入网关：代理意图域名被解析成网关自己的 IP，自然漏斗进网关上的 **mihomo**；直连意图域名返回真实 IP，客户端直接连接、网关不经手。mihomo 的后续出口由运维者拥有的完整配置决定（默认种子为 `DIRECT`，也可配置应用层代理节点/组）。客户端通过 **DoT** 接入（DoT 是唯一的 DNS 接入方式），**无需装任何 App**。
 
-> 🚀 **第一次部署?** 跟着 **[新手图文教程 →](docs/QUICKSTART.md)** 一步步来(从准备服务器到手机连上,全程带图)。
-
-```
- 手机 (Android 私密 DNS / iOS 描述文件,仅 DoT)
-   │  DoT :853
-   ▼
- 网关服务器 ── mosdns ──► 直连域名:返回真实 IP
-   │                     策略域名:A 记录改写为网关 IP,AAAA/HTTPS 置空
-   │  :80/:443 识别 SNI
-   ▼
- sing-box ──► 按域名调度:业务 A→出口 A  业务 B→出口 B  默认→本机直出
-```
-
-核心思想:**把 DNS 当策略引擎**。
-策略域名的 A 记录被改写成网关自己的 IP,流量回到网关后由 sing-box 根据 SNI/Host 选择合规出口。
-终端全程只需一条「私密 DNS」设置,无需安装额外网络客户端。
+> 仅用于已获合法授权的企业组网与技术研究，请遵守所在地法律法规。
 
 ---
 
-## ⚠️ 适用场景 / 部署前提
+## 工作原理
 
-本项目面向具有固定私有源地址段的专用移动网络,不提供开放互联网接入服务。部署需要:
-
-- 一台能被运营商私网访问的**网关服务器**。
-- 一张运营商「**内网卡 / 定向内网 SIM**」,手机流量经运营商私网到达网关,且**源 IP 是固定私有段**(如 `172.x`)。
-  网关使用这个私有源段识别授权查询来源。
-  - 没有这种内网卡时,策略响应会影响其他查询来源,不适用本项目。
-- 一个你能修改 DNS 记录的**域名**(用于 DoT 和 Let's Encrypt 证书)。
-- 一个 **Telegram bot**(可选,用于快捷管理出口和分流)。
-- 一个或多个经过授权的**远程业务出口**(可选,未匹配流量默认从网关服务器直出)。出口由 sing-box 管理,bot 能直接识别的链接见下。
-
----
-
-## 一键安装 (Debian 12+ / Ubuntu 22+)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/resx/Privdns-Gateway/main/install.sh | sudo bash
+```
+客户端 (Android 私人 DNS / iOS 描述文件)
+        │  DoT :853   (TLS，Let's Encrypt 或 debug 证书)   —— 唯一 DNS 传输
+        ▼
+┌────────────────────────────────────────────────────────────┐
+│ 5gpn-dns —— 一个 Go 二进制，一个进程                         │
+│   ① 按 order 评估统一策略，跨意图 first-match                │
+│      block → NXDOMAIN；direct → 真实 IP；proxy → 网关 IP     │
+│   ② 未命中按 fallback：auto / direct / gateway               │
+│      auto 使用确定性 chnroute 仲裁                            │
+│        并发查 国内UDP ‖ 可信DoT                              │
+│        国内答案 IP ∈ chnroute? → 直连;否则 → 网关 IP        │
+│                                                             │
+│   同进程还跑：控制台 REST API + Web UI + iOS 描述文件        │
+│              (回环 :443，经 mihomo 的 :443 SNI 分流暴露；     │
+│               console 公开 SPA+/ios，API bearer；zash 白名单)、 │
+│              zashboard 面板、Telegram bot                    │
+└────────────────────────────────────────────────────────────┘
+        │ 境外 → 网关 IP                    │ 国内 → 真实 IP / 封锁 → NXDOMAIN
+        ▼                                    ▼
+  mihomo (TCP 80/443/5060/8080/8443; UDP 443/5060) Client direct / no connection
+  · SNI == console → DIRECT 回环（API bearer）；SNI == zashboard →
+    源 IP 命中 whitelist.txt 才 DIRECT，否则快速 REJECT
+  · Other SNI/QUIC → mihomo sniffs the hostname and resolves through the
+    5gpn-dns loopback boundary (127.0.0.1:5354). Active extensions may select
+    trust/china; other hostnames use trust and China carries DNS_CHINA_ECS.
+  · enabled native extension capture host + MITM master on → authenticated SOCKS5 TCP/UDP → 5gpn-intercept
+    (configurable TLS/H1/H2 + QUIC v1/v2/HTTP3 termination or QUIC fallback protection) →
+    authenticated SOCKS5 TCP/UDP → mihomo intercept-egress → ordered operator group binding → operator egress
+        │
+        ▼
+  按运维者的 mihomo 配置选择应用层出口（默认 DIRECT）→ 互联网
 ```
 
-入口脚本只负责自举,实际安装会自动切到最新 `v*` 发布 tag,不安装 main 上未发布的中间提交。
+**一个主域名、一条证书 lineage**：`BASE_DOMAIN` 自动派生 `console.<base>`、`zash.<base>` 和 `dot.<base>`。Cloudflare 模式签发 apex + `*.<base>`，HTTP-01 模式则只签发这三个服务名的精确 SAN；两种生产模式都固定使用 `--cert-name <base>` 的同一条 scoped lineage。`console.<base>` 提供 SPA 与公开的 iOS profile 下载，所有 `/api/*` 仍强制 bearer token；`zash.<base>` 继续由 mihomo 来源白名单保护。
 
-> ⚠️ **从原项目 `v1.1.16` 或其他旧版本迁移?** 请先阅读 [原项目迁移指南](docs/MIGRATION-FROM-ORIGINAL.md)。迁移前必须先留快照，不要直接用 `install.sh` 覆盖已有安装。
+Modular MITM uses a completely separate private root CA. It is not
+part of the public lineage above and never replaces the DoT or console
+certificate. Only the root-owned certificate publisher can use its signing key
+to create a leaf for the enabled extension capture-host set; the runtime sidecar cannot
+read that key.
 
-或克隆后运行(便于先看代码):
-
-```bash
-git clone https://github.com/resx/Privdns-Gateway.git
-cd privdns-gateway
-git fetch --tags
-git checkout "$(git tag -l 'v*' --sort=-v:refname | head -1)"
-sudo ./install.sh
-```
-
-脚本会装好 mosdns、sing-box(1.12)、管理 bot、内网 HTTPS 管理面板、防火墙和证书,自动识别公网 IP 和内网卡段,再交互填 DoT 域名(**bot token 可留空**,装完随时 `sudo pdg-set-token` 再设并启用)。
-域名 A 记录这步留给你自己做(脚本会等你确认指向本机后再签证书)。
-详见 [docs/INSTALL.md](docs/INSTALL.md)。
-
-卸载:`sudo ./uninstall.sh`(加 `--purge` 连配置一起删)。
-
-## 装完之后
-
-1. 手机【私密 DNS / DoT】填你的域名(如 `dot.example.com`)。
-2. Telegram 给 bot 发 `/start`:
-   - **📤 出口管理 → 添加**:直接粘贴节点链接。
-     > **bot 能直接粘**:`ss:// / vmess:// / trojan:// / vless://(含 reality)/ hysteria:// / hysteria2:// / tuic:// / anytls:// / shadowtls:// / ssh://(密码认证) / socks5:// / http://`,以及 Surge 的 `名字 = ss, …` 行。
-     > WireGuard endpoint 等没有统一分享格式的出站仍需手写 `/etc/sing-box/config.json`。
-   - **📑 分流管理**:把域名、`.list` / `.txt` 等规则集指到出口(默认其余国际走 VPS 直出)。
-   - **🔀 策略组**:多个节点默认自动优选，也可固定指定节点；可作为默认策略或分流目标。
-3. 管理面板:bot **📱 客户端 → 🖥 管理面板**,手机走内网卡时打开 `https://你的DoT域名:9443/`。PWA 集成节点订阅与结构化覆写、分类组自动/固定节点、三目标测速、批量域名/CIDR 分流、规则排序与远程规则集、连接和日志、Geosite/项目在线更新。节点订阅支持 Clash YAML、Base64/纯 URI 列表和 SIP008，可预览差异并每日自动刷新。管理端要求独立令牌，不是只靠来源 IP。
-4. iOS:安装结束时终端会直接输出二维码；Bot **📱 客户端 → iOS 二维码/文件** 会发送二维码和 `.mobileconfig` 文件；**不用 bot 的话** `sudo pdg ios` 也可随时显示二维码。二维码指向常驻 `http://你的DoT域名:8111/ios-dot.mobileconfig`，手机走内网卡扫码 → Safari → 安装。
-   Wi-Fi/蜂窝都按 `:81` 探测自动判定启不启用(已有自定义路由的普通 Wi-Fi 自动直连、互不干扰); `8111` 只对内网卡来源放行;
-   bot 生成时还可指定「强制直连」的 Wi-Fi 名单(SSID,治 captive portal 误判)。
-5. 换域名:bot **🌐 DoT 自定义域名**,自动签证书并切换。
-
-## 日常管理
-
-```bash
-sudo pdg            # 进管理菜单
-sudo pdg doctor     # 自检(只读); --json 可脚本化; --deep 加端到端检查(DoT握手/:81/DNS/clash)
-sudo pdg status     # 状态
-sudo pdg admin      # 显示管理面板地址和令牌链接(敏感,不要分享);加 --rotate 轮换令牌
-sudo pdg update     # 更新(更新前自动快照, 失败自动回滚; --dry-run 看待更新)
-sudo pdg snapshot   # 手动留一份配置快照
-sudo pdg rollback   # 回滚到最近快照
-sudo pdg token      # 设置 / 更换 bot token
-sudo pdg restart    # 重启服务
-sudo pdg log [n]    # 看日志
-sudo pdg traffic    # 网卡流量(vnstat)
-sudo pdg ios        # 不用 bot, 直接出 iOS 描述文件二维码
-sudo pdg report     # 脱敏诊断报告(隐藏 token/密码/uuid); --redact-ip 连IP/域名也隐藏; --full 不脱敏
-sudo pdg detect-cidr # 抓包重新识别内网卡来源段, 与现配不符可一键写回并重启
-sudo pdg uninstall [--purge]   # 卸载(--purge 连配置删)
-```
-
-> 健康自检每 10 分钟自动跑,服务挂 / DNS 不应答 / 证书快到期会 Telegram 私信你。
-
-> 分工:`pdg` 管生命周期;PWA 管常用出口/分流;Telegram bot 管快捷操作、规则集、DNS 上游和面板入口。
-
-## 组成
-
-| 层 | 用什么 | 说明 |
+| 场景 | DNS 行为 | 数据路径 |
 |---|---|---|
-| DNS | **mosdns v5** | 国内直连 / 策略域名 A 记录改写到本机 + AAAA/HTTPS 置空 / 按来源 IP 分支 / ECS 分治 / 缓存。DoT(853) |
-| 流量 | **sing-box 1.12** | `direct` 监听 + `sniff_override_destination`(**不用 tproxy**);多出口 urltest 故障切换;clash_api 测速/流量 |
-| 管理 | **Web PWA + Telegram bot** | PWA 管节点/订阅覆写/测速/分流/资源/连接；Bot 提供快捷操作；配置事务先 `check`、失败回滚 |
-| 证书 | **certbot standalone** | Let's Encrypt,自动续期(已处理 80 口被 sing-box 占的坑) |
-| 防火墙 | **nftables** | 对全网只留 SSH;DNS/数据/探测口只放行内网卡来源段 |
+| 命中 block | NXDOMAIN | 客户端不发起连接 |
+| 命中 proxy（强制进入网关） | 直接返回网关 IP | 客户端 → mihomo → 运维者配置的出口 |
+| 仲裁后国外 IP | 改写为网关 IP | 客户端 → mihomo → 运维者配置的出口 |
+| 仲裁后国内 IP | 原样返回真实 IP | 客户端直连，网关不经手 |
+| SNI = console 域名 | —— | 公开 SPA 资源与 `/ios/ios-dot.mobileconfig`；`/api/*` 强制 bearer |
+| SNI = zashboard 域名（源 IP 在白名单） | —— | mihomo :443 → 独立回环面板 |
 
-> ⚠️ sing-box **必须 1.12.x** —— 1.13 移除了 `sniff_override_destination`,本网关会失效。install.sh 已固定版本。
+---
+
+## 关键特性
+
+- **Deterministic chnroute arbitration**: query the operational China resolver `223.5.5.5` and trust resolver `22.22.22.22` concurrently over UDP/53, then decide by chnroute membership rather than response speed.
+- **DoT-only 入口**：唯一的客户端 DNS 传输是 DoT `:853`；不提供 DoH 或客户端明文 `:53`。另有一个仅回环的 `127.0.0.1:5353` 明文调试监听，仅用于本机排障。
+- **All query types**: A uses arbitration and rewriting; AAAA returns IPv4-only NODATA with SOA; HTTPS/SVCB returns NODATA to preserve hostname sniffing; other types use the trust upstream.
+- **Per-extension origin DNS**: every imported extension defaults to `trust` and may be operator-bound to `china`. The loopback resolver applies the first enabled matching extension in execution order; China uses the live China group and ECS, while non-extension hostnames use trust. DNS cannot select by URL path. Capture hosts, action host matchers, and the enabled certificate set are each bounded to 512 patterns.
+- **Sniff-failure isolation**: new mihomo seeds pair same-port `console.<base>` listener targets with an exact `force-domain` entry. Successful sniffing still replaces the provisional target with the real origin, while malformed public traffic cannot poison one shared IP failure-cache key for every connection.
+- **有序统一策略**：`/etc/5gpn/policy.json` 中每条规则以 exact/suffix/keyword/subscription 匹配一种 block/direct/proxy 意图，跨意图按全局顺序 first-match；未命中项可选 auto/direct/gateway fallback。系统 chnroute 与编译后的策略订阅由进程内抓取器定时更新，域名列表支持 `plain`/`gfwlist`/`dnsmasq`/`hosts`，chnroute 使用 `cidr`；失败保留旧缓存（离线安全）。
+- **统一控制面**（多前端共用同一内存 `Controller`）：
+  - **HTTPS REST API + React Web 控制台 + iOS 描述文件**：console SPA 资源与 profile 下载公开，所有 API 需 bearer token；iOS/Android 配置说明、二维码与下载入口统一位于控制台“配置向导”；zashboard 仍由 mihomo `whitelist.txt` 来源白名单保护。
+  - **zashboard 面板**：同样经 mihomo SNI 分流 + 白名单暴露到本机另一回环端口。
+  - **In-process Telegram bot**: `github.com/go-telegram/bot`, restricted to allowlisted administrators in private chats, calls `Controller` directly without loopback HTTP or a bearer token.
+  - **Consistent plugin control**: Console `/extensions` and the trusted Telegram plugin menus share the same marketplace and extension managers. Telegram supports marketplace sources and browsing, marketplace/URL/pasted-text installation, uninstall, enable/disable, every typed setting, `location`, egress binding, ordering, and updates. Transactions update certificates, mihomo rules, and DNS steering together or retain/restore the old state. `/extensions/hosts` remains the rich per-plugin capture-host audit view.
+  - **Mihomo controller TLS**：zash 证书角色由 zashboard 与 mihomo controller 共用。`DNS_MIHOMO_CONTROLLER` 是回环拨号地址；客户端以派生的 `zash.<base>` 校验 TLS 身份并信任 `DNS_ZASH_CERT`。Mihomo v1.19.28 通过只读 `SAFE_PATHS=/etc/5gpn/cert/zash` 读取位于 `-d /etc/5gpn/mihomo` 外的证书。普通重装逐字节保留已通过校验的 operator-owned 配置；若 verified controller transport 无法构造，DNS 与其余控制面继续运行，Mihomo 健康、配置和代理端点返回 unavailable/503，绝不降级到明文 HTTP。
+- **出口由 mihomo 原生配置拥有**：被代理流量经 mihomo 的 `tunnel` 监听 + 内置嗅探器透明转发；完整 `/etc/5gpn/mihomo/config.yaml` 由运维者管理，默认 `Proxies` 组只有 `DIRECT`，也可加入 mihomo 支持的应用层节点/组。The allowlisted module sidecar is the only TLS-termination exception, and every transformed upstream returns through mihomo. An extension may require an operator binding to an existing group, but its manifest and script cannot name or change that group. A reviewed manifest may separately declare bounded global `REJECT`/`DIRECT` rules; exact rules appear in the single enable confirmation and exist only while both the extension and MITM master are enabled. DNS 策略只决定“是否进入网关”，绝不生成 mihomo 出口。仍禁止 TUN/TProxy、WireGuard、fwmark、策略路由表或把本项目变成客户端默认路由器。
+- **Explicit alternate Web ports**: the initial mihomo seed accepts TCP `:8080` and `:8443` in addition to `:80` and `:443`. HTTP Host or TLS SNI replaces the synthetic gateway destination while preserving the accepted port. This does not provide arbitrary-port, raw-UDP, no-SNI, or ECH-inner-name forwarding.
+- **Ingress modules**: Settings exposes a fixed, explicit catalog backed by the complete operator-owned mihomo YAML. The `speedtest-5060` module is enabled in fresh and explicitly reset seeds, adding TCP/UDP `:5060`, a same-port `console.<base>:5060` forced-sniff target, HTTP/TLS/QUIC sniffing, and port-scoped rejects for the loopback console panels. Operators can disable or re-enable it with revision checks, full `mihomo -t` validation, backup, atomic publication, and hot-apply rollback. Its hostname target isolates malformed traffic from the other default ingress ports. TCP needs a visible Host/SNI and UDP supports recognizable QUIC only — Ookla native UDP and other raw UDP remain unsupported. Because `5060` is also a common SIP port and the listener is an unauthenticated Host/SNI relay, restrict its sources with the provider security group or an independently managed firewall.
+- **Native interception extensions and marketplace**: installed snapshots are managed on `/extensions`, while the top-level `/marketplace` page is the Web discovery surface for operator-added `5gpn.io/marketplace/v1` indexes; the trusted private-chat Telegram bot exposes the same normalized management state. Marketplace refreshes are bounded, SSRF-guarded, atomically cached, and never install or enable anything automatically. Selecting an entry confirms its cached scope, refetches the manifest through the native parser, verifies the published manifest/script digests and required routing-rule count, and stores the ordinary disabled immutable snapshot for actual review. Direct URL and local-paste installation still accept only strict `5gpn.io/v1` manifests. Every script runs in a fresh bounded goja VM with no filesystem, process, timer, module-loader, socket, or ambient `fetch`; only explicitly declared and confirmed origins expose synchronous `context.network.request`, and all traffic returns through mihomo. Response projections, patches, and permitted network results preserve validated HTTP/gRPC trailers. First-party source remains external in [`moooyo/5gpn-extensions`](https://github.com/moooyo/5gpn-extensions), whose official marketplace URL is `https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json`.
+  The complete author contract is documented in [`docs/native-extensions.md`](docs/native-extensions.md).
+- **MITM runtime controls**: Settings owns a disabled-by-default master switch plus `MitM over HTTP/2` and `QUIC fallback protection`. The master atomically publishes or removes the DNS/mihomo host routes and starts or stops `5gpn-intercept`, while preserving armed module snapshots. HTTP/2 can be disabled for new client/upstream connections. QUIC fallback protection discards only already-matched IETF QUIC v1/v2 traffic so capable clients can retry over TCP/HTTPS; it does not claim legacy GQUIC support.
+- **Default HTTP/3 / QUIC compatibility guard**: fresh and explicitly reset mihomo configs enable a Settings-controlled fixed rule that rejects gateway UDP/443 after the ordered authenticated interception-egress rules and their fail-closed guard. Capable clients fall back to TCP/HTTPS. Existing valid operator configs are preserved, and this is not host-firewall management.
+- **无宿主防火墙**：项目不管理宿主 nftables；zashboard 的网络访问控制由 mihomo 来源白名单承担，console API 依赖 bearer 鉴权。
+- **Operational hardening**: certificate pairs hot-reload without a service restart; HTTP-01 stops mihomo only for the bounded ACME `:80` challenge; `kill -HUP` remains rules-only; privileged bot operations can request only pre-installed fixed units through narrowly authorized `systemctl` actions.
+- **Minimal runtime dependencies**: the repository contains no Python. `5gpn-dns` retains its three direct dependencies (`miekg/dns`, `go-telegram/bot`, and `yaml.v3`); the separate interception module has four explicit direct dependencies: `quic-go`, `goja`, `regexp2` (used to bound goja's backtracking fallback), and pinned `brotli` decoding. Release binaries are built in CI, so no compiler toolchain is installed on the gateway.
+
+---
+
+## 安装
+
+在一台 root 权限的 Linux 网关上：
+
+```bash
+# Latest official release (default)
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash
+
+# Latest published beta prerelease (explicit opt-in)
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
+
+# A checkout delegates to the same exact-tag bundle selection
+sudo bash install.sh
+sudo bash install.sh --beta
+```
+
+Official and beta selection is per installer invocation. The default path only
+accepts `X.Y.Z`; `--beta` only accepts a published `X.Y.Z-beta.N` prerelease.
+Missing or malformed beta metadata fails closed and never falls back to an
+official release. Release channels select only first-party 5gpn artifacts;
+third-party version and checksum pins remain unchanged.
+
+### Stable-to-beta upgrades
+
+The upgrade behavior described here is present in this repository revision but
+must be published in a new beta prerelease before the public quick installer can
+resolve it. Do not assume that an earlier published beta contains these changes.
+
+A normal stable-to-beta upgrade is the conservative, core-preserving path:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta
+```
+
+The common persisted JSON schemas are compatible. The beta installer adds its
+new interception state and treats a missing marketplace document as an empty
+source list without migrating the existing policy, upstream, ECS, Telegram,
+subscription, or statistics documents. A valid legacy mihomo configuration is
+validated and preserved byte-for-byte. The installer
+then checks the interception boundary structurally. If the legacy configuration
+lacks the authenticated `intercept-egress` listener, `MODULE-INTERCEPT` node, or
+fail-closed rule, the DNS, Console, Telegram, and existing mihomo data plane are
+installed as a core-only upgrade and the completion output explicitly reports
+that Extensions are unavailable. It never silently patches operator YAML.
+
+Use the following path only when replacing the complete operator-owned mihomo
+configuration is acceptable:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moooyo/5gpn/main/quick-install.sh | sudo bash -s -- --beta upgrade-reset-mihomo
+```
+
+`upgrade-reset-mihomo` requires an existing installation and an interactive
+TTY confirmation. In the same install transaction it retains a byte-for-byte
+backup, renders the current beta seed, runs pinned `mihomo -t`, and publishes the
+candidate atomically. Custom proxies, providers, groups, and rules are not
+merged automatically and must be restored manually from the backup. Normal
+install, reinstall, and `configure` never select this reset path.
+
+Every pre-v5 deployment—including `0.0.19`, `test-env`, and `kfchost`—requires
+one explicit, recoverable configuration rebuild before the current quick
+installer runs. While the old v4 daemon still owns the transaction, first take
+an active-state recovery snapshot of `dns.env`, `intercept/config.json`, and the
+complete mihomo file. Then turn off the MITM master through the authenticated
+Console/API and verify that the sidecar stopped and the old
+egress/policy/capture blocks were withdrawn from mihomo. Save a second, clean
+post-disable copy of the v4 document and mihomo file, then stop `5gpn-dns` so no
+writer can race the rebuild. The two snapshots are distinct: the first can
+restore the original active state, while the second is the required v5 routing
+baseline.
+
+Use `jq` to project only installer-owned infrastructure from v4 into a disabled,
+empty v5 document. This preserves the two authenticated SOCKS credential pairs,
+listener, TLS paths, upstream proxy, and protocol choices; it deliberately
+clears plugin snapshots and order. `NEW_5GPN_INTERCEPT`, `NEW_5GPN_DNS`, and
+`NEW_INSTALL_SH` must name checksum-verified current artifacts extracted from
+the target release bundle.
+
+```bash
+set -euo pipefail
+: "${NEW_5GPN_INTERCEPT:?set this to the verified current sidecar binary}"
+: "${NEW_5GPN_DNS:?set this to the verified current DNS binary}"
+: "${NEW_INSTALL_SH:?set this to the verified current installer}"
+
+candidate=""
+env_candidate=""
+config_rollback=""
+env_rollback=""
+old=""
+env_file=""
+config_published=0
+env_published=0
+committed=0
+cleanup_candidates() {
+  if (( committed == 0 )); then
+    if (( env_published == 1 )) && [[ -n "$env_rollback" && -n "$env_file" ]]; then
+      sudo mv -fT -- "$env_rollback" "$env_file" || true
+      env_rollback=""
+    fi
+    if (( config_published == 1 )) && [[ -n "$config_rollback" && -n "$old" ]]; then
+      sudo mv -fT -- "$config_rollback" "$old" || true
+      config_rollback=""
+    fi
+    sudo sync -d /etc/5gpn/intercept 2>/dev/null || true
+    sudo sync -d /etc/5gpn 2>/dev/null || true
+  fi
+  for path in "$candidate" "$env_candidate" "$config_rollback" "$env_rollback"; do
+    [[ -z "$path" ]] || sudo rm -f -- "$path"
+  done
+}
+trap cleanup_candidates EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+sudo install -d -m 0700 /root/5gpn-pre-v5
+
+# Before any mutation: retain the original active state.
+sudo cp -a /etc/5gpn/dns.env /root/5gpn-pre-v5/dns.env.active
+sudo cp -a /etc/5gpn/intercept/config.json /root/5gpn-pre-v5/intercept-v4.active.json
+sudo cp -a /etc/5gpn/mihomo/config.yaml /root/5gpn-pre-v5/mihomo.active.yaml
+
+# Disable MITM through the old authenticated API before stopping its daemon.
+base="$(sudo sed -n 's/^DNS_BASE_DOMAIN=//p' /etc/5gpn/dns.env)"
+token="$(sudo sed -n 's/^DNS_API_TOKEN=//p' /etc/5gpn/dns.env)"
+console="console.${base}"
+api=(--fail --silent --show-error --cacert /etc/5gpn/cert/web/current/fullchain.pem \
+  --resolve "${console}:443:127.0.0.1" -H "Authorization: Bearer ${token}")
+settings="$(sudo curl "${api[@]}" "https://${console}/api/interception/settings")"
+jq -e '(.http2 | type) == "boolean" and (.quic_fallback_protection | type) == "boolean"' <<<"$settings" >/dev/null
+revision="$(jq -er '.revision' <<<"$settings")"
+http2="$(jq -r '.http2' <<<"$settings")"
+quic="$(jq -r '.quic_fallback_protection' <<<"$settings")"
+payload="$(jq -cn --arg revision "$revision" --argjson http2 "$http2" --argjson quic "$quic" \
+  '{revision:$revision,enabled:false,http2:$http2,quic_fallback_protection:$quic}')"
+sudo curl "${api[@]}" -X PUT -H 'Content-Type: application/json' --data "$payload" \
+  "https://${console}/api/interception/settings" >/dev/null
+
+# Prove the old transaction withdrew its overlay and stopped the sidecar.
+modules="$(sudo curl "${api[@]}" "https://${console}/api/interception/modules")"
+jq -e '.active_capture_hosts | length == 0' <<<"$modules" >/dev/null
+for _ in {1..20}; do
+  sudo systemctl is-active --quiet 5gpn-intercept.service || break
+  sleep 0.25
+done
+if sudo systemctl is-active --quiet 5gpn-intercept.service; then
+  echo 'old interception sidecar is still active' >&2
+  exit 1
+fi
+
+# Snapshot that clean post-disable boundary separately, then stop the writer.
+sudo cp -a /etc/5gpn/intercept/config.json /root/5gpn-pre-v5/intercept-v4.disabled.json
+sudo cp -a /etc/5gpn/mihomo/config.yaml /root/5gpn-pre-v5/mihomo.post-disable.yaml
+sudo systemctl stop 5gpn-dns.service
+
+old=/etc/5gpn/intercept/config.json
+sudo jq -e '.version == 4 and .mitm.enabled == false' "$old" >/dev/null
+candidate="$(sudo mktemp /etc/5gpn/intercept/.config.v5.XXXXXX)"
+if ! sudo jq '
+  if (.version == 4 and .mitm.enabled == false) then {
+    version: 5,
+    listen: .listen,
+    username: .username,
+    password: .password,
+    tls_cert: .tls_cert,
+    tls_key: .tls_key,
+    upstream_proxy: .upstream_proxy,
+    mitm: {
+      enabled: false,
+      http2: (if .mitm.http2 == null then true else .mitm.http2 end),
+      quic_fallback_protection: (if .mitm.quic_fallback_protection == null then true else .mitm.quic_fallback_protection end)
+    },
+    execution_order: [],
+    modules: []
+  } else error("expected interception v4 with MITM already disabled") end
+' "$old" | sudo tee "$candidate" >/dev/null; then
+  sudo rm -f -- "$candidate"
+  candidate=""
+  exit 1
+fi
+sudo chown --reference="$old" "$candidate"
+sudo chmod --reference="$old" "$candidate"
+if ! sudo "$NEW_5GPN_INTERCEPT" --config "$candidate" --check-config; then
+  sudo rm -f -- "$candidate"
+  candidate=""
+  exit 1
+fi
+routing_rc=0
+sudo "$NEW_5GPN_DNS" --check-interception-routing \
+  --mihomo-config /etc/5gpn/mihomo/config.yaml \
+  --intercept-config "$candidate" || routing_rc=$?
+if (( routing_rc != 0 )); then
+  sudo rm -f -- "$candidate"
+  candidate=""
+  exit "$routing_rc"
+fi
+
+env_file=/etc/5gpn/dns.env
+if [[ "$(sudo grep -c '^DNS_EGRESS_RESOLVER=' "$env_file" || true)" != 1 ]]; then
+  echo 'expected exactly one retired DNS_EGRESS_RESOLVER key' >&2
+  exit 1
+fi
+env_candidate="$(sudo mktemp /etc/5gpn/.dns.env.v5.XXXXXX)"
+if ! sudo grep -v '^DNS_EGRESS_RESOLVER=' "$env_file" | sudo tee "$env_candidate" >/dev/null; then
+  exit 1
+fi
+if [[ "$(sudo grep -c '^DNS_EGRESS_RESOLVER=' "$env_candidate" || true)" != 0 ]]; then
+  echo 'retired resolver survived the dns.env candidate rewrite' >&2
+  exit 1
+fi
+sudo chown --reference="$env_file" "$env_candidate"
+sudo chmod --reference="$env_file" "$env_candidate"
+if ! sudo env INSTALL_SH_LIB_ONLY=1 bash -c \
+  'source "$1"; validate_dns_env_schema "$2"' _ "$NEW_INSTALL_SH" "$env_candidate"; then
+  exit 1
+fi
+
+sudo sync -f "$candidate"
+sudo sync -f "$env_candidate"
+config_rollback="$(sudo mktemp /etc/5gpn/intercept/.config.v4.rollback.XXXXXX)"
+env_rollback="$(sudo mktemp /etc/5gpn/.dns.env.v4.rollback.XXXXXX)"
+sudo cp -a -- "$old" "$config_rollback"
+sudo cp -a -- "$env_file" "$env_rollback"
+sudo sync -f "$config_rollback"
+sudo sync -f "$env_rollback"
+config_published=1
+if ! sudo mv -fT -- "$candidate" "$old"; then
+  exit 1
+fi
+candidate=""
+env_published=1
+if ! sudo mv -fT -- "$env_candidate" "$env_file"; then
+  exit 1
+fi
+env_candidate=""
+sudo sync -d /etc/5gpn/intercept
+sudo sync -d /etc/5gpn
+committed=1
+sudo rm -f -- "$config_rollback" "$env_rollback"
+config_rollback=""
+env_rollback=""
+trap - EXIT HUP INT TERM
+```
+
+The old master-disable and `ready` routing check are mandatory: an empty v5
+document cannot claim or remove rules owned by the old snapshot. Do not merely
+change the version number, and do not delete v4 and let the installer generate
+new random credentials; either would break the preserved mihomo boundary. The
+synced dual-file transaction removes the one retired environment key; afterward
+run the current installer and explicitly re-import and review every extension. The
+installer reports this workflow when it detects either stale shape.
+
+The `0.0.13` stable installer also predates the channel delegation mechanism,
+so use the remote quick installer after completing the rebuild above. Starting with `0.0.14`, an
+installed stable release accepts `sudo 5gpn --beta` (and the explicit reset
+command) by handing the entire invocation to its stored, verified quick installer. A
+successful beta upgrade does not promise an in-place downgrade to stable; use a
+pre-upgrade system snapshot or the install transaction's automatic failure
+rollback instead of running the stable installer over beta state.
+
+> First installation requires the TUI. It collects the certificate mode, base domain, certificate email, and Cloudflare token when selected. `PUBLIC_IP` is detected automatically; the gateway and listener default to it. `5gpn configure` retains advanced public/gateway/listener overrides for special network layouts. China DNS defaults to `223.5.5.5` over UDP/53, trust DNS defaults to `22.22.22.22` over UDP/53, China ECS defaults to `112.96.32.0/24`, and cache size is selected from the memory profile. Caller environment variables never override configuration; a first install without a TTY fails closed, while reinstall can reuse a valid current-schema `dns.env` non-interactively.
+
+> TCP `:8080`, TCP/UDP `:5060`, and TCP `:8443` are present in new seeds and explicit `5gpn mihomo-reset` output. Reinstall preserves an existing valid operator-owned mihomo config byte-for-byte, so existing deployments do not gain missing listeners automatically; use the module switch where manageable, edit the YAML manually, or use the explicit reset path after reviewing its backup-and-replace behavior. Provider security groups or upstream firewalls must allow only the intended clients.
+
+> The `speedtest-5060` switch requires the reviewed rule boundary: base panel protocol/port rejects, the two `:5060` panel rejects, panel routes, zashboard deny-by-default, anti-loop destination guards, then terminal `MATCH`. The anti-loop guards intentionally follow the panel routes because mihomo resolves the console fallback through `hosts` before rule matching. Older operator-owned configs are still preserved and may therefore show the module as custom/unmanageable until the rules are reordered manually or the reviewed seed is restored explicitly.
+
+安装器会先把固定版本的 5gpn-dns、Web、mihomo、zashboard 下载到 staging 并强制校验 SHA-256，再备份当前部署、原子发布并执行 readiness 探针；发布后失败会自动回滚。生产证书可选 Cloudflare DNS-01 或 HTTP-01，debug 模式使用隔离的自签证书。
+
+**内网部署**（客户端在内网，如 `172.22.0.0/16`，经内网直达网关、不经公网）——这是本项目的主力场景：
+
+运行 `sudo bash install.sh`，在 TUI 的“客户端可达网关 IPv4”中填写内网地址；证书模式也在同一向导选择。`console.`、`zash.`、`dot.` 三个域名自动从主域名派生。
+
+- **配置只有一个持久入口**：安装器配置由 TUI 写入 `/etc/5gpn/dns.env`；重装只读该文件，明确忽略调用者环境。仅 Cloudflare 模式需要的 API token 单独保存在 root-only 的 `/etc/5gpn/acme/cloudflare.ini`，不会进入 `dns.env`、调用者环境或日志。
+- **重跑刷新程序、保留运维配置**：每次运行安装脚本都会刷新 systemd 单元、`/opt/5gpn` 运行目录以及 pin 版本的 5gpn-dns/mihomo/Web 产物；`/etc/5gpn` 和 `/etc/letsencrypt` 持久保留。已有且通过 `mihomo -t` 的完整 mihomo 配置会逐字节保留；只有显式 `mihomo-reset` 或 TTY 确认的 `--beta upgrade-reset-mihomo` 才会在备份和校验后替换它。下载或校验失败会中止且不预删工作二进制。
+- **一个主域名、一条 lineage、三个证书角色目录**：两种生产模式都只使用 cert-name 为 `<base>` 的**一条** scoped Certbot lineage，并部署到 `/etc/5gpn/cert/{dot,web,zash}`。所有身份和证书模式修改统一进入 `5gpn configure` TUI；`CERT_MODE` 只允许 `cloudflare`、`http-01`、`debug`。
+  - **cloudflare** — TUI 输入 Cloudflare API token，DNS-01 签发 apex `<base>` + `*.<base>`；签发和续期都不停止 mihomo。即使当前证书可复用，也必须保留受保护的 token 以保证自动续期；`zash.<base>` 可继续只由 5gpn 合成解析。
+  - **http-01** — 签发且只签发 `console.<base>`、`zash.<base>`、`dot.<base>` 三个精确 SAN，不包含 apex 或 wildcard。TUI 会展示三条所需 A 记录并要求确认，再通过固定解析器 `1.1.1.1` 等待三个名字各自只有一条 A 且均为 `DNS_PUBLIC_IP`；三者都不得发布 AAAA。初签及到期续签会短暂停止 mihomo 释放 TCP `:80`，并在成功或失败后恢复。
+  - **debug** — TUI 选择的自签模式；无 Certbot。仍有效且 SAN/IP/私钥匹配时复用，不会每次重签。
+  - **安全复用**：生产复用要求有效期、可信链、cert/key 匹配，以及与模式完全一致的 SAN。没有 5gpn ownership provenance 的外部 lineage 只允许严格只读复用：安装器不会强制续期、改 SAN、改 authenticator 或取得删除权限，且不会为它启用 5gpn 公网证书 timer；失效、临期、部分损坏或模式不匹配会直接拒绝。debug 自签永远不能进入生产复用路径。
+- **按域名访问**：`console.<base>` 必须提前有指向公网或客户端可路由网关 IP 的 A 记录；该检查没有环境变量 bypass。HTTP-01 进一步要求三个服务名都满足上述公网 A/无 AAAA 约束。SPA 资源与 iOS profile 下载公开，所有 `/api/*` 仍需 bearer token。
+  The Cloudflare API token manages ACME TXT records only; the operator must create the displayed `console.<base>` A record before confirming the installer prompt.
+- **分离续期入口**：5gpn-owned 公网 lineage 的 systemd timer 与 Telegram bot 确认动作调用同一个 mode-aware helper，只处理 `--cert-name <base>`。独立且始终启用的 `5gpn-intercept-cert.timer` 只检查私有 interception leaf，不依赖公网 lineage 或证书模式。未到期时不打断数据面；Cloudflare 到期续签仍不停机，HTTP-01 到期续签会再次等待 `1.1.1.1` DNS 检查通过后再执行 `:80` 的短暂停机窗口。
+- **IPv4 前提**：本方案全链路 **IPv4-only**（AAAA 一律 SOA、chnroute/网关改写仅 IPv4、守护进程沙箱仅 `AF_INET`）。要求 5G/APN 给客户端分配 **可路由到网关的 IPv4**（或 CLAT）；IPv6-only 接入的客户端够不到网关。
+
+安装版本和第三方版本/摘要固定在发布包中，不接受 `DNS_VERSION`、`MIHOMO_VERSION` 或 `*_SHA256` 环境覆盖。Telegram token、管理员、代理和告警也从管理 TUI 配置。
+
+---
+
+## 客户端接入
+
+- **Android**：登录 Web 控制台并打开“配置向导”，按页面提示在“私人 DNS”中填写实际 DoT 域名。
+- **iOS**：登录 Web 控制台并打开“配置向导”，使用页面二维码或下载按钮安装已签名描述文件。
+
+---
+
+## 🖥 Web 控制台
+
+- **地址**：`https://console.<BASE_DOMAIN>/`。SPA 公开；所有 `/api/*` 仍需 `DNS_API_TOKEN`。zashboard 单独保留来源 IP 白名单。
+- **登录**：用 `DNS_API_TOKEN` 登录（浏览器 localStorage 保存）。找回：`grep DNS_API_TOKEN /etc/5gpn/dns.env`。
+- **访问控制**：zashboard 的源 IP 白名单在 mihomo 层前置拦截；console API 使用 bearer token 鉴权。
+- **功能**：Dashboard、iOS/Android 配置向导、解析日志、解析测试、有序统一策略规则与 fallback、上游/ECS/Telegram 设置、mihomo 健康与 ticket 化实时日志，以及经 `mihomo -t` 校验的完整 mihomo 配置编辑/显式重置。
+- **zashboard 面板**：`https://zash.<BASE_DOMAIN>/`，同样经 mihomo SNI 分流 + 白名单保护到本机另一回环端口。
+
+---
+
+## 📱 Telegram 控制 bot
+
+Telegram bot 是 `5gpn-dns` 守护进程内的一个 Go 组件（不是独立进程/服务），直接调用进程内 `Controller`（不经回环 `:443`、不需 token），与 Web 控制台并存。
+
+**两种配置入口**（都走同一条校验与原子保存路径，Web 更方便）：
+
+```bash
+# 守护进程启动后：通过 TUI 输入 token/admin，调用本机 PUT /api/tgbot
+sudo bash install.sh setup-tgbot
+```
+
+2) **Web 控制台**（推荐）：设置 → Telegram 机器人，填令牌 + 管理员 ID → 保存。
+
+两种入口都由后端先调用 Telegram `getMe` 校验新令牌，再切换 bot goroutine，并把有效配置以 `0600` 原子写入 `DNS_TGBOT_FILE`（默认 `/etc/5gpn/tgbot.json`）。CLI 明确识别并更新这个有效 override；调用者环境中的 `TGBOT_*` 会被丢弃，没有 TTY 时快速失败。override 若损坏或不可读，bot 会 fail-closed 停用；`GET /api/tgbot` 永不返回令牌明文。
+
+- **私聊与管理员门控**：`/id` 用于取得数字 user ID；状态、日志和操作菜单只接受已配置管理员的私聊，不向群组泄露网关信息。
+- **Trusted plugin-management endpoint**: the private-chat bot can manage marketplace sources, browse cached entries, install from a marketplace entry or HTTPS URL, import pasted manifest text, uninstall, enable/disable, edit all typed settings, bind egress, reorder extensions, and check/apply updates. Complex DNS-policy editing, subscriptions, and the complete mihomo YAML remain Web-only.
+- **Review before every plugin write**: the bot shows the complete normalized impact first, including exact routing rules and routing precedence when applicable, then issues a short-lived one-use confirmation bound to the administrator, exact private chat, operation, current revision, and exact extension snapshot or marketplace index digest. Expired, replayed, stale, cross-user, cross-chat, or digest-mismatched confirmations fail closed. Install and update apply always finish disabled; one enable confirmation authorizes the complete reviewed snapshot.
+- **Network-permission review**: every exact declared origin is listed, together with a warning that the script may send any decrypted request, response, setting, or storage data visible to it there. A changed snapshot requires a fresh review.
+- **Location privacy and input**: `location` settings accept a Telegram native location message or manual longitude, latitude, and accuracy. The bot warns that coordinates pass through Telegram and the Bot API. City search, the draggable OpenStreetMap point, and accuracy visualization remain available in the Console.
+- **Inline menu**: status/refresh, DNS diagnosis, logs/refresh, upstreams,
+  maintenance, iOS installation, marketplace, installed plugins, and the Web
+  Console.
+- **Confirmed operations**: Mihomo restart and certificate renewal use 60-second one-use confirmations and process-level deduplication; plugin writes use the stronger revision-and-digest-bound review flow above. The only DNS maintenance action is in-process rule reload, not a disguised daemon restart.
+- **Telegram 原生输出**：iOS 使用 URL 按钮和 PNG 二维码；短日志保留最新故障行并按 Unicode/HTML 安全分页，超长日志作为受保护文本文件发送。
+- **受限网络出站**：在 `5gpn setup-tgbot` TUI 中配置 Telegram 专用 HTTP/HTTPS CONNECT 代理；修改该启动期设置时会重启 `5gpn-dns`。5gpn 不会改写 operator-owned mihomo 配置；如使用本机 mihomo，operator 必须自行提供仅按需暴露的 HTTP/mixed listener。
+- **可选状态告警**：在同一 TUI 中启用后，证书、Mihomo 和上游健康状态变化会以受保护私聊推送给所有已配置管理员（用户须先主动打开 bot 私聊）。该监视器与守护进程同生共死，主机/进程宕机仍必须依靠外部 dead-man's switch。
+
+---
+
+## 从 PrivDNS Gateway v2 原地迁移
+
+已有 `/etc/mosdns`、`/etc/sing-box` 部署使用专用迁移入口，不要直接覆盖安装：
+
+```bash
+sudo bash install.sh migrate-pdg
+```
+
+迁移器先把旧配置、程序、systemd 状态和 nftables 配置保存到 `/var/lib/5gpn/migrations/<UTC时间>/`，再运行 5gpn 安装事务。`5gpn-dns` 接管 DoT，mihomo 接管 80/443 与 GMS 入口；旧 sing-box 被收敛为 `127.0.0.1:18081` 的兼容出口，原节点、订阅分流、Telegram SOCKS `:8445` 与旧 9443 管理端继续可用。任何步骤失败都会停止新服务并恢复旧文件和服务状态。
+
+迁移时应选择与旧地址一致的 `dot.<base>` 域名和网关 IPv4。扩展与 MITM 状态不会从旧系统推断，迁移后仍保持默认关闭。确认所有节点已改入 mihomo 后，才应人工下线兼容 sing-box；迁移器不会自动删除旧数据。
+
+## 常用命令
+
+安装完成后，终端直接输入 **`5gpn`** 打开交互管理菜单（状态 / 重启 / 编辑安装与证书配置 / 重载规则 / zashboard 白名单 / iOS 描述文件 / 轮换令牌 / Cloudflare token / Telegram Bot / 卸载）。也可带子命令直接执行：
+
+```bash
+5gpn                        # 打开管理菜单
+5gpn status                # 服务 / 域名 / 列表 状态
+5gpn restart               # 重启 5gpn-dns + 5gpn-intercept + mihomo
+5gpn configure             # 打开完整配置 TUI，事务化应用并在失败时回滚
+5gpn mihomo-reset          # 显式备份当前配置，以通过 mihomo -t 的最新种子原子替换
+5gpn --beta upgrade-reset-mihomo # 跨频道升级并在 TTY 确认后事务化替换完整 mihomo 配置
+5gpn reload-rules          # 重载规则缓存与 chnroute（SIGHUP）
+5gpn add-allow cidr        # 添加 zashboard 来源 IP 白名单（live 生效）
+5gpn del-allow cidr        # 从 zashboard 白名单移除
+5gpn ios                   # 重新生成 iOS 描述文件 + 二维码
+5gpn setup-tgbot           # 校验并热应用进程内 Telegram bot 配置
+sudo bash install.sh migrate-pdg # 从 PrivDNS Gateway v2 原地迁移（仅执行一次）
+5gpn rotate-token          # 轮换控制台 DNS_API_TOKEN（旧 token 立即失效 + 重启）
+5gpn set-cf-token          # 在 TUI 中设置/更新 Cloudflare API token
+5gpn uninstall             # TUI 确认卸载，默认保留 /etc/5gpn
+5gpn uninstall --purge     # 清除非证书状态，仍保留 cert/debug-cert/acme/intercept-ca 供复用
+5gpn uninstall --decommission # 仅在 provenance 证明 5gpn 创建时删除精确 lineage，并安全处理凭据
+```
+
+Uninstall preserves the verified `/opt/5gpn/bin/gum` binary for reuse by other host automation while removing the remaining 5gpn runtime.
+
+等价的 `sudo bash install.sh <同名子命令>` 仍可用。
+
+配置改动：`systemctl reload 5gpn-dns`（=SIGHUP）**只重载 policy 编译结果与 chnroute**，不主动拉取远程订阅。**dns.env 里的守护进程开关（上游、网关IP、监听地址、token、cache、TTL、0x20、心跳等）在启动时读取一次，改动后需 `systemctl restart 5gpn-dns` 才生效**；证书是例外——按文件 mtime 在下次握手自动加载。
+
+---
+
+## 仓库结构
+
+| 路径 | 说明 |
+|---|---|
+| `cmd/5gpn-dns/` | `5gpn-dns` Go 源码——DNS 引擎 + 控制面 API + bot + iOS 分发，全在一个二进制（CI 构建 → `moooyo/5gpn` release） |
+| `cmd/5gpn-dns/api.go` | 控制台 HTTPS REST API + Web + iOS profile 下载（回环 `:443`，基于 `Controller` facade，经 mihomo SNI 分流对外暴露） |
+| `cmd/5gpn-dns/bot.go` `bot_ops.go` | 进程内 Telegram bot |
+| `cmd/5gpn-dns/iosd.go` | iOS 描述文件分发（公开 `/ios/ios-dot.mobileconfig`，`/ios/` 跳转到控制台向导） |
+| `web/` | React 控制台前端（独立构建；`npm run build` → `web/dist`，打包成 `5gpn-web-*.tar.gz` release asset；daemon 从 `DNS_WEB_DIR`=/opt/5gpn/web 磁盘 serve） |
+| `install.sh` / `quick-install.sh` | 安装 / 重装编排 + 运维子命令 |
+| `etc/` | 规则种子、`5gpn-dns/dns.env.example`、mihomo 配置模板、systemd 单元 |
+| `scripts/` | iOS profile、证书续期、规则重载及 PrivDNS Gateway v2 原地迁移 |
+| `tests/` | Go 单测 `cmd/5gpn-dns/*_test.go` + shell policy 测试 + 集成冒烟清单 |
+
+---
+
+## 构建与发布
+
+- `5gpn-dns` **在 CI 构建**（网关上不放 Go 工具链）：`release.yml` 先 `npm run build` 前端 → `go build`（`-X main.version` 打版本号）→ 发布 `5gpn-dns-linux-amd64` + `5gpn-web-<ver>.tar.gz`（前端 SPA）+ **`5gpn-installer.tar.gz`（install.sh + 配置模板 + 脚本，`DNS_VERSION_DEFAULT` 已 stamp 到本 tag）** + `checksums.txt`。
+- CI（`ci.yml`）：`go vet` + `go test -race`、前端 build+typecheck、shell policy 测试（含 mihomo 配置模板的 grep 断言）。
+- **Release channels**: official `X.Y.Z` tags must be reachable from `main` and
+  publish normal latest-eligible releases. Beta `X.Y.Z-beta.N` tags must be
+  reachable from `beta` and publish prereleases with `make_latest=false`. Both
+  channels run the shared checks gate, stamp `DNS_VERSION_DEFAULT` to the exact
+  tag, and publish the matching installer, daemon, Web, checksum, and optional
+  tagged-tree first-party assets. The quick installer verifies the bundle from
+  that exact tag and never falls back to branch content or the other channel.
+
+---
 
 ## 文档
 
-- [docs/INSTALL.md](docs/INSTALL.md) — 安装细节 / DNS 配置 / 端口 / 版本注意
-- [docs/MIGRATION-FROM-ORIGINAL.md](docs/MIGRATION-FROM-ORIGINAL.md) — 从原项目 `v1.1.16` 等旧版本无损迁移
-- [docs/MANAGEMENT.md](docs/MANAGEMENT.md) — PWA 管理端 / API / 认证 / 前端开发
-- [docs/TROUBLESHOOTING-PLAYBOOK.md](docs/TROUBLESHOOTING-PLAYBOOK.md) — 排障手册(症状 → 查 → 修)
-- [docs/production-notes.md](docs/production-notes.md) — 实战记录与踩坑(sing-box 版本坑、QUIC 自环、ECS、安全加固等)
-- [CHANGELOG.md](CHANGELOG.md) — 更新日志
-
-## 致谢
-
-- [misaka-cpu/privdns-gateway](https://github.com/misaka-cpu/privdns-gateway):本项目的原始项目。
-- [IrineSistiana/mosdns](https://github.com/IrineSistiana/mosdns) 与 [SagerNet/sing-box](https://github.com/SagerNet/sing-box):核心 DNS 和流量调度组件。
-- [Loyalsoldier/v2ray-rules-dat](https://github.com/Loyalsoldier/v2ray-rules-dat):mosdns Geosite 数据来源。
-- [blackmatrix7/ios_rule_script](https://github.com/blackmatrix7/ios_rule_script) 与 [DustinWin/ruleset_geodata](https://github.com/DustinWin/ruleset_geodata):管理面板规则集预设来源。
-- [Twemoji Mozilla](https://github.com/mozilla/twemoji-colr):管理面板 flags-only 字体来源，字体代码采用 Apache-2.0，图形采用 CC BY 4.0。
-- [MetaCubeX/MetaCubeXD](https://github.com/MetaCubeX/metacubexd) 与 [Zephyruso/Zashboard](https://github.com/Zephyruso/zashboard):管理面板策略组 master-detail、节点选择和规则展开交互的 MIT 授权前端资源来源。
-
-第三方项目和数据遵循各自的开源许可证与使用条款；随 PWA 分发的许可证和改造说明位于 `web/public/third-party/`。
-
-## 免责声明
-
-本项目仅供**学习与合法网络管理**用途。请遵守你所在地的法律法规;使用者自行承担责任。作者不对任何使用后果负责。
-
-## License
-
-[MIT](LICENSE)
+- 原生插件开发规范：[docs/native-extensions.md](docs/native-extensions.md)
+- 官方插件目录与开发示例：[moooyo/5gpn-extensions](https://github.com/moooyo/5gpn-extensions)
+- 官方插件市场：<https://moooyo.github.io/5gpn-extensions/marketplace/v1/index.json>
+- 行为验收（在 Linux 网关上执行）：[tests/integration-smoke.md](tests/integration-smoke.md)
